@@ -1,0 +1,161 @@
+# Docker Compose for testing the Django OIDC app against Keycloak or Authentik.
+#
+# Usage:
+#   docker compose --profile keycloak  up --build      # Keycloak  → app on :3000
+#   docker compose --profile authentik up --build      # Authentik → app on :3001
+#   docker compose --profile keycloak --profile authentik up --build   # both at once
+#
+# IMPORTANT: add this line to your host's /etc/hosts first (see README-docker.md):
+#   127.0.0.1 keycloak authentik
+
+networks:
+  auth-demo:
+
+volumes:
+  keycloak-db-data:
+  authentik-db-data:
+  authentik-redis-data:
+
+services:
+  # ----------------------------------------------------------------------- #
+  # Keycloak                                                                 #
+  # ----------------------------------------------------------------------- #
+  keycloak-db:
+    image: postgres:16-alpine
+    profiles: [keycloak]
+    networks: [auth-demo]
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    profiles: [keycloak]
+    networks: [auth-demo]
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      # Force the public/issuer URL so the browser and the app container both
+      # use http://keycloak:8080 — keeps the OIDC issuer consistent.
+      KC_HOSTNAME: http://keycloak:8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-demo.json:/opt/keycloak/data/import/realm-demo.json:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+  web-keycloak:
+    build: .
+    profiles: [keycloak]
+    networks: [auth-demo]
+    env_file: .env.keycloak
+    ports:
+      - "3000:3000"
+    depends_on:
+      - keycloak
+
+  # ----------------------------------------------------------------------- #
+  # Authentik                                                                #
+  # ----------------------------------------------------------------------- #
+  authentik-db:
+    image: postgres:16-alpine
+    profiles: [authentik]
+    networks: [auth-demo]
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: 35660f3ee95505fa32bb3ed79920f6c1
+    volumes:
+      - authentik-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  authentik-redis:
+    image: redis:7-alpine
+    profiles: [authentik]
+    networks: [auth-demo]
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - authentik-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2024.12
+    profiles: [authentik]
+    networks: [auth-demo]
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: 7a120ca319710f1a7d12cbd38542445c2f8ef2d3a0b874e7c755b53a42037af7
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: 35660f3ee95505fa32bb3ed79920f6c1
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      # Bootstrap admin (akadmin) — used to log in and as the first test user.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: d6cb97568b44697b7861691c
+      AUTHENTIK_BOOTSTRAP_TOKEN: 99d7b2f7013af86e8a18af5f27c1d8bde35abb07fada8dac
+      AUTHENTIK_BOOTSTRAP_EMAIL: admin@example.com
+    volumes:
+      - ./authentik/blueprints:/blueprints/custom:ro
+    ports:
+      - "9000:9000"
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2024.12
+    profiles: [authentik]
+    networks: [auth-demo]
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: 7a120ca319710f1a7d12cbd38542445c2f8ef2d3a0b874e7c755b53a42037af7
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: 35660f3ee95505fa32bb3ed79920f6c1
+      AUTHENTIK_REDIS__HOST: authentik-redis
+    volumes:
+      - ./authentik/blueprints:/blueprints/custom:ro
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  web-authentik:
+    build: .
+    profiles: [authentik]
+    networks: [auth-demo]
+    env_file: .env.authentik
+    ports:
+      - "3001:3001"
+    depends_on:
+      - authentik-server

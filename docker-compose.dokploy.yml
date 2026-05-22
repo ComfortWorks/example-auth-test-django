@@ -1,0 +1,199 @@
+# Production/staging Docker Compose for Dokploy.
+#
+# Differences from the local docker-compose.yml:
+#   - No host port bindings. Traefik (managed by Dokploy) owns 80/443; we only
+#     `expose` internal ports and attach web-facing services to dokploy-network.
+#     Assign public domains in the Dokploy UI (Domains tab) — it injects the
+#     Traefik labels for you. Map:
+#         web        -> ${APP_DOMAIN}  port 3000
+#         keycloak   -> ${IDP_DOMAIN}  port 8080   (keycloak profile)
+#         authentik  -> ${IDP_DOMAIN}  port 9000   (authentik profile)
+#   - The app runs under gunicorn with PY_ENV=production (set via entrypoint).
+#   - All secrets/domains come from Dokploy environment variables (see
+#     .env.dokploy.example).
+#
+# Deploy ONE identity provider per stack:
+#   docker compose -f docker-compose.dokploy.yml --profile keycloak  up -d
+#   docker compose -f docker-compose.dokploy.yml --profile authentik up -d
+# (In Dokploy, set the active profile via the Compose "command"/profile field,
+#  or keep two separate Compose services in the project.)
+
+networks:
+  # Created by Dokploy; Traefik routes traffic over it.
+  dokploy-network:
+    external: true
+  internal:
+
+volumes:
+  keycloak-db-data:
+  authentik-db-data:
+  authentik-redis-data:
+
+services:
+  # ----------------------------------------------------------------------- #
+  # Django app (shared by both profiles)                                     #
+  # ----------------------------------------------------------------------- #
+  web:
+    build: .
+    profiles: [keycloak, authentik]
+    restart: unless-stopped
+    networks: [dokploy-network, internal]
+    expose:
+      - "3000"
+    environment:
+      PY_ENV: production
+      PORT: "3000"
+      WEB_CONCURRENCY: "3"
+      ALLOWED_HOSTS: ${APP_DOMAIN}
+      CSRF_TRUSTED_ORIGINS: https://${APP_DOMAIN}
+      SESSION_SECRET: ${SESSION_SECRET}
+      SESSION_DURATION: "3600"
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME}
+      # Public issuer of the chosen IdP, e.g.
+      #   Keycloak : https://${IDP_DOMAIN}/realms/demo
+      #   Authentik: https://${IDP_DOMAIN}/application/o/django
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      OIDC_CALLBACK_URL: https://${APP_DOMAIN}/auth/callback
+      OIDC_POST_LOGIN_URL: /profile
+      OIDC_POST_LOGOUT_URL: https://${APP_DOMAIN}/auth/logout/callback
+    # If your host can't hairpin the public IdP domain back to Traefik,
+    # uncomment and point it at the host gateway:
+    # extra_hosts:
+    #   - "${IDP_DOMAIN}:host-gateway"
+
+  # ----------------------------------------------------------------------- #
+  # Keycloak                                                                 #
+  # ----------------------------------------------------------------------- #
+  keycloak-db:
+    image: postgres:16-alpine
+    profiles: [keycloak]
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    profiles: [keycloak]
+    restart: unless-stopped
+    networks: [dokploy-network, internal]
+    # Production mode (not start-dev). TLS is terminated at Traefik, which
+    # forwards HTTP + X-Forwarded-* headers to Keycloak.
+    command: start --import-realm --optimized=false
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      # Public issuer URL — must match OIDC_ISSUER's host on the app.
+      KC_HOSTNAME: https://${IDP_DOMAIN}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-demo.json:/opt/keycloak/data/import/realm-demo.json:ro
+    expose:
+      - "8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------- #
+  # Authentik                                                                #
+  # ----------------------------------------------------------------------- #
+  authentik-db:
+    image: postgres:16-alpine
+    profiles: [authentik]
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${AK_DB_PASSWORD}
+    volumes:
+      - authentik-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  authentik-redis:
+    image: redis:7-alpine
+    profiles: [authentik]
+    restart: unless-stopped
+    networks: [internal]
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - authentik-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2024.12
+    profiles: [authentik]
+    restart: unless-stopped
+    networks: [dokploy-network, internal]
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AK_DB_PASSWORD}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AK_ADMIN_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AK_BOOTSTRAP_TOKEN}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AK_ADMIN_EMAIL}
+      # Consumed by the blueprint to set the provider's redirect URIs + secret.
+      APP_BASE_URL: https://${APP_DOMAIN}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+    volumes:
+      - ./authentik/blueprints:/blueprints/custom:ro
+    expose:
+      - "9000"
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2024.12
+    profiles: [authentik]
+    restart: unless-stopped
+    networks: [internal]
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AK_DB_PASSWORD}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      APP_BASE_URL: https://${APP_DOMAIN}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+    volumes:
+      - ./authentik/blueprints:/blueprints/custom:ro
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
