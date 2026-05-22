@@ -15,8 +15,11 @@
 # Deploy ONE identity provider per stack:
 #   docker compose -f docker-compose.dokploy.yml --profile keycloak  up -d
 #   docker compose -f docker-compose.dokploy.yml --profile authentik up -d
-# (In Dokploy, set the active profile via the Compose "command"/profile field,
-#  or keep two separate Compose services in the project.)
+# IMPORTANT (Dokploy): there is no --profile CLI flag in the UI. You MUST set
+#   COMPOSE_PROFILES=keycloak   (or: authentik)
+# in the Environment tab, or NO services start and the deploy fails with
+# "No such container: select-a-container". To run both, create two separate
+# Compose services, one per profile.
 
 networks:
   # Created by Dokploy; Traefik routes traffic over it.

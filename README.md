@@ -208,8 +208,22 @@ What you cannot do is put both on the same host (e.g. both on
 1. Fork this repo to your own GitHub and push your changes.
 2. In Dokploy: **Create Project** → add a **Compose** service → choose your
    fork as the source → set the compose path to `docker-compose.dokploy.yml`.
-3. Select the active profile (`keycloak` or `authentik`). Deploy one IdP per
-   stack; to compare both, create two Compose services (or two projects).
+3. **Set the active profile (required).** Every service in
+   `docker-compose.dokploy.yml` is gated behind a Compose profile
+   (`keycloak` or `authentik`). Compose only starts services whose profile is
+   active, so you **must** tell Dokploy which one to use — otherwise *zero*
+   services match and the deploy creates no containers (this is the usual cause
+   of the `No such container: select-a-container` error). Locally you pass
+   `--profile keycloak` on the CLI, but in Dokploy there's no CLI flag, so set it
+   as an environment variable in the **Environment** tab (see §7.3):
+
+   ```
+   COMPOSE_PROFILES=keycloak     # or: authentik
+   ```
+
+   Deploy one IdP per stack; to compare both, create two Compose services (or
+   two projects), one with `COMPOSE_PROFILES=keycloak` and one with
+   `COMPOSE_PROFILES=authentik`.
 
 ### 7.3 Environment variables and secrets
 
@@ -370,6 +384,7 @@ use, upgrade story, admin ergonomics) rather than features on paper.
 
 | Symptom | Likely cause / fix |
 |---|---|
+| Dokploy: `No such container: select-a-container` | The Compose profile isn't set, so no services start. Set `COMPOSE_PROFILES=keycloak` (or `authentik`) in the Environment tab (§7.2). If the app *does* run and this only shows in logs, it's a cosmetic Dokploy artifact and can be ignored. |
 | Login redirects, then errors on `/auth/callback`; `iss` mismatch | Browser and app reach the IdP at different URLs. Local: missing `/etc/hosts` line or port mismatch. Prod: `OIDC_ISSUER` host ≠ the public IdP domain. |
 | `invalid_scope` | A non-standard scope leaked in. Confirm `lib/scopes.py` lists only `openid profile email offline_access`. |
 | `redirect_uri` mismatch | The IdP client doesn't have the exact callback URL. Match scheme/host/path precisely (`https://app.../auth/callback`). |
@@ -385,6 +400,7 @@ use, upgrade story, admin ergonomics) rather than features on paper.
 
 | Variable | Required | Purpose |
 |---|---|---|
+| `COMPOSE_PROFILES` | Dokploy | Active Compose profile: `keycloak` or `authentik`. Required for the Dokploy deploy — without it no services start. (Local CLI uses `--profile` instead.) |
 | `OIDC_ISSUER` | yes | IdP issuer base URL (may include a path) |
 | `OIDC_CLIENT_ID` | yes | OAuth client ID |
 | `OIDC_CLIENT_SECRET` | yes | OAuth client secret (Authlib needs a value even with PKCE) |
