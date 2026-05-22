@@ -296,26 +296,113 @@ attaches `dokploy-network` for you). Map:
 Enable HTTPS / Let's Encrypt for each. The compose uses `expose` (not `ports`)
 precisely so Traefik owns external traffic.
 
-### 7.5 IdP-specific production notes
+### 7.5 Keycloak: required setup steps
 
-- **Keycloak** runs in production mode (`start`, not `start-dev`) with
-  `KC_HOSTNAME=https://id.staging.example.com`, `KC_PROXY_HEADERS=xforwarded`,
-  and `KC_HTTP_ENABLED=true` (Traefik terminates TLS and forwards HTTP +
-  `X-Forwarded-*`). The realm's redirect URIs must include
-  `https://app.staging.example.com/auth/callback` and the post-logout URL — edit
-  `keycloak/realm-demo.json` before deploying, or add them in the admin UI after.
-- **Authentik** derives its issuer from the forwarded host, so the public domain
-  flows through automatically. The blueprint's redirect URIs come from
-  `APP_BASE_URL` (set in the compose to `https://${APP_DOMAIN}`), so they're
-  correct without manual edits.
+Keycloak needs four things aligned before login works end-to-end. Each one,
+if missed, fails at a *different* stage of the login flow (startup → redirect →
+token exchange → offline-token grant), so do all four — every one is required
+for a working login.
 
-### 7.6 Deploy & verify
+**Step 1 — `KC_HOSTNAME` and proxy (already in the compose).** Keycloak runs in
+production mode (`start`, not `start-dev`) with `KC_HOSTNAME=https://${IDP_DOMAIN}`,
+`KC_PROXY_HEADERS=xforwarded`, and `KC_HTTP_ENABLED=true` (Traefik terminates TLS
+and forwards `X-Forwarded-*`). You only need to ensure `IDP_DOMAIN` is set (§7.3);
+an empty value makes Keycloak 500 on startup with
+`URISyntaxException: Expected scheme-specific part`.
+
+**Step 2 — Register the app's redirect URIs (REQUIRED).** Keycloak only redirects
+back to *exactly* registered URLs; otherwise login fails after authentication with
+`invalid_redirect_uri`. The `django-app` client must list your real app domain.
+
+- *Before first deploy:* edit `keycloak/realm-demo.json` — set the `django-app`
+  client's `redirectUris`, `webOrigins`, and `post.logout.redirect.uris` to your
+  app domain. The repo file already contains entries for
+  `https://keycloak-web.staging.comfort-works.com`; replace those with your own
+  `APP_DOMAIN` if different. Required values:
+  ```
+  redirectUris:  https://<APP_DOMAIN>/auth/callback
+                 https://<APP_DOMAIN>/auth/logout/callback
+  webOrigins:    https://<APP_DOMAIN>
+  post logout:   https://<APP_DOMAIN>/auth/logout/callback
+  ```
+  > Keycloak's realm-import does **not** reliably substitute `${ENV}`
+  > placeholders, so these are hardcoded — edit them literally, don't templatize.
+- *If the realm is already imported* (it imports **only once**, on first start,
+  when the realm doesn't yet exist — later edits to the JSON have no effect):
+  add the same URLs in the admin console under **Clients → django-app → Valid
+  redirect URIs / Web origins / Valid post logout redirect URIs**. Alternatively
+  delete the realm (or wipe the Keycloak DB volume) and redeploy to re-import.
+
+**Step 3 — Make the client secret match (REQUIRED).** The app sends
+`OIDC_CLIENT_SECRET`; Keycloak compares it to the secret stored on the
+`django-app` client. A mismatch fails at the token-exchange step with
+`invalid_client_credentials` (`grant_type=authorization_code`) — i.e. *after* a
+seemingly successful login. Because the realm imports only once, whatever you put
+in `OIDC_CLIENT_SECRET` afterward does **not** propagate to Keycloak
+automatically. Align them one of two ways:
+
+- *Adopt Keycloak's secret (simplest if the realm already exists):* admin console
+  → **Clients → django-app → Credentials** → copy the **Client secret**, then set
+  `OIDC_CLIENT_SECRET` in the app/web service Environment to that exact value and
+  redeploy the app.
+- *Force your own secret:* on the same **Credentials** tab paste your generated
+  value (or set it in `realm-demo.json`'s `"secret"` field before first import),
+  and use the identical value for `OIDC_CLIENT_SECRET`.
+
+Checks that catch the common mistakes:
+- Verify the value actually reached the container:
+  `docker exec <web-container> env | grep OIDC_CLIENT_SECRET` — it must match the
+  Credentials tab byte-for-byte (no quotes, no trailing newline/space).
+- Confirm the client is **Confidential** (Client authentication = ON) on the
+  client's Settings tab; a public client has no secret and also yields
+  `invalid_client_credentials`.
+
+**Step 4 — Allow offline tokens (REQUIRED).** The app requests the
+`offline_access` scope on every login (it's in `lib/scopes.py`). Issuing an
+offline token needs **two** things, and missing *either* fails the token
+exchange with `not_allowed: Offline tokens not allowed for the user or client`
+(again *after* a seemingly successful login):
+
+1. **The client may issue offline tokens** — `offline_access` must be a
+   **Default** client scope on `django-app` (not Optional).
+2. **The user holds the `offline_access` role** — normally granted via the
+   realm's `default-roles-<realm>` composite. A user created by realm import
+   does *not* automatically get default roles unless the import lists them, so
+   this is easy to miss.
+
+Fixes:
+
+- *Before first deploy:* the repo's `realm-demo.json` now handles both — it lists
+  `offline_access` under the client's `defaultClientScopes`, and gives the `demo`
+  user `realmRoles: ["default-roles-demo", "offline_access"]`. A fresh import is
+  correct.
+- *If the realm is already imported:*
+  - Client scope: admin console → **Clients → django-app → Client scopes** → set
+    `offline_access`'s **Assigned type** to **Default**.
+  - User role: admin console → **Users → demo → Role mapping → Assign role** →
+    filter by realm roles → assign **`offline_access`** (or `default-roles-demo`).
+- *Alternatively*, if you don't need refresh tokens, remove `offline_access`
+  from `lib/scopes.py` and redeploy the app — then neither Keycloak change is
+  needed.
+
+### 7.6 Authentik: setup notes
+
+Authentik is lower-touch here. It derives its issuer from the forwarded host, so
+the public domain flows through automatically, and the blueprint's redirect URIs
+come from `APP_BASE_URL` (set in the compose to `https://${APP_DOMAIN}`) with the
+client secret read from `OIDC_CLIENT_SECRET` — so both are correct without manual
+edits. Unlike Keycloak's one-shot realm import, the Authentik blueprint **is
+reconciled on every startup**, so edits to it apply on redeploy.
+
+### 7.7 Deploy & verify
 
 Deploy, then watch logs until the IdP is healthy and (Authentik) the worker logs
-show the blueprint applied. Visit `https://app.staging.example.com`, sign in, and
-confirm you reach `/profile`.
+show the blueprint applied. Visit `https://<APP_DOMAIN>`, sign in, and confirm you
+reach `/profile`. If login fails, the stage it fails at tells you which step
+above to recheck: startup 500 → Step 1; `invalid_redirect_uri` → Step 2;
+`invalid_client_credentials` → Step 3; `not_allowed: Offline tokens` → Step 4.
 
-### 7.7 If login fails right after the IdP redirect (hairpin)
+### 7.8 If login fails right after the IdP redirect (hairpin)
 
 The app server makes a server-to-server call to the IdP's **public** domain. On
 some hosts, a container can't reach the host's own public IP (no NAT hairpin). If
@@ -387,12 +474,14 @@ use, upgrade story, admin ergonomics) rather than features on paper.
 | Dokploy: `No such container: select-a-container` | The Compose profile isn't set, so no services start. Set `COMPOSE_PROFILES=keycloak` (or `authentik`) in the Environment tab (§7.2). If the app *does* run and this only shows in logs, it's a cosmetic Dokploy artifact and can be ignored. |
 | Login redirects, then errors on `/auth/callback`; `iss` mismatch | Browser and app reach the IdP at different URLs. Local: missing `/etc/hosts` line or port mismatch. Prod: `OIDC_ISSUER` host ≠ the public IdP domain. |
 | `invalid_scope` | A non-standard scope leaked in. Confirm `lib/scopes.py` lists only `openid profile email offline_access`. |
-| `redirect_uri` mismatch | The IdP client doesn't have the exact callback URL. Match scheme/host/path precisely (`https://app.../auth/callback`). |
+| `redirect_uri` mismatch / `invalid_redirect_uri` | The Keycloak client doesn't list the exact callback URL. Fix per §7.5 Step 2 (add `https://<APP_DOMAIN>/auth/callback` + `/auth/logout/callback`; in the admin UI if the realm is already imported). |
+| `invalid_client_credentials` (token exchange) | App's `OIDC_CLIENT_SECRET` ≠ Keycloak's stored client secret. Fix per §7.5 Step 3 (copy from **Clients → django-app → Credentials**, set on the app, redeploy). Check for stray whitespace and that the client is Confidential. |
+| `not_allowed: Offline tokens not allowed` (token exchange) | App requests `offline_access` but it's not fully enabled. Needs BOTH: `offline_access` as a **Default** client scope AND the user holding the `offline_access` role (§7.5 Step 4). Or drop the scope from `lib/scopes.py`. |
 | CSRF 403 on sign-in in production | `CSRF_TRUSTED_ORIGINS` missing the app's `https://` origin. |
-| Keycloak fails to start in prod | Hostname not set. Ensure `KC_HOSTNAME`, `KC_PROXY_HEADERS=xforwarded`, `KC_HTTP_ENABLED=true`. |
+| Keycloak fails to start in prod (`URISyntaxException`) | `KC_HOSTNAME` malformed — usually `IDP_DOMAIN` unset/empty (§7.5 Step 1). Ensure it's set, plus `KC_PROXY_HEADERS=xforwarded`, `KC_HTTP_ENABLED=true`. |
 | Authentik blueprint didn't apply | Check `authentik-worker` logs; the pinned image is `2024.12`. If you bump it and the `redirect_uris` schema changed, adjust the blueprint, or create the provider/app in the admin UI as a fallback. |
 | Static files 404 in production | `collectstatic` didn't run — the entrypoint runs it automatically when `PY_ENV=production`; check the container logs. |
-| App can't reach IdP in prod (connection refused/timeout) | Hairpin NAT; see §7.7 and the `extra_hosts` fallback. |
+| App can't reach IdP in prod (connection refused/timeout) | Hairpin NAT; see §7.8 and the `extra_hosts` fallback. |
 
 ---
 

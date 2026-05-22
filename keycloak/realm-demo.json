@@ -19,24 +19,26 @@
       "serviceAccountsEnabled": false,
       "redirectUris": [
         "http://localhost:3000/auth/callback",
-        "http://localhost:3000/auth/logout/callback"
+        "http://localhost:3000/auth/logout/callback",
+        "https://keycloak-web.staging.comfort-works.com/auth/callback",
+        "https://keycloak-web.staging.comfort-works.com/auth/logout/callback"
       ],
       "webOrigins": [
-        "http://localhost:3000"
+        "http://localhost:3000",
+        "https://keycloak-web.staging.comfort-works.com"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:3000/auth/logout/callback"
+        "post.logout.redirect.uris": "http://localhost:3000/auth/logout/callback##https://keycloak-web.staging.comfort-works.com/auth/logout/callback"
       },
       "defaultClientScopes": [
         "web-origins",
         "profile",
         "roles",
-        "email"
-      ],
-      "optionalClientScopes": [
+        "email",
         "offline_access"
-      ]
+      ],
+      "optionalClientScopes": []
     }
   ],
   "users": [
@@ -53,6 +55,10 @@
           "value": "demo",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "default-roles-demo",
+        "offline_access"
       ]
     }
   ]
