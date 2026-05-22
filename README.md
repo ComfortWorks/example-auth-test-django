@@ -188,6 +188,21 @@ real HTTPS domains, to mirror production before choosing an IdP.
 - Two DNS **A records** pointing at the server, e.g.
   `app.staging.example.com` and `id.staging.example.com`.
 
+**`APP_DOMAIN` and `IDP_DOMAIN` must be different hostnames.** The app and the
+identity provider are two separate web services, and Traefik routes incoming
+requests to one or the other *by hostname*. If they shared a hostname, Traefik
+couldn't tell which service a request was for — they'd collide. They can be
+subdomains of the same parent domain (that's the normal setup), so you only need
+one domain you own plus two A records pointing at the same server:
+
+```
+APP_DOMAIN=app.staging.example.com     →  Django app
+IDP_DOMAIN=id.staging.example.com      →  Keycloak / Authentik
+```
+
+What you cannot do is put both on the same host (e.g. both on
+`staging.example.com`).
+
 ### 7.2 Create the project
 
 1. Fork this repo to your own GitHub and push your changes.
@@ -196,20 +211,62 @@ real HTTPS domains, to mirror production before choosing an IdP.
 3. Select the active profile (`keycloak` or `authentik`). Deploy one IdP per
    stack; to compare both, create two Compose services (or two projects).
 
-### 7.3 Environment variables
+### 7.3 Environment variables and secrets
 
 In the Compose service's **Environment** tab, paste and fill
-`.env.dokploy.example`. Generate fresh secrets:
+`.env.dokploy.example`. Several values are secrets *you generate yourself* —
+they are not handed to you by the IdP. Generate them all at once:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))"
+python3 -c "import secrets as s; [print(f'{k}={s.token_hex(n)}') for k,n in \
+[('OIDC_CLIENT_SECRET',24),('SESSION_SECRET',32),('AK_SECRET_KEY',32),\
+('AK_DB_PASSWORD',16),('AK_BOOTSTRAP_TOKEN',24),('KC_DB_PASSWORD',16)]]"
 ```
 
-Critically, `OIDC_CLIENT_SECRET` must be identical on the app and the IdP, and
-`OIDC_ISSUER` must use the public IdP domain:
+| Variable | Generate with | What it's for | Used by |
+|---|---|---|---|
+| `OIDC_CLIENT_SECRET` | `token_hex(24)` | Shared OIDC client secret | app **and** IdP (must match) |
+| `SESSION_SECRET` | `token_hex(32)` | Signs the Django session cookie | app |
+| `KC_DB_PASSWORD` | `token_hex(16)` | Keycloak's Postgres password | Keycloak profile |
+| `AK_SECRET_KEY` | `token_hex(32)` | Authentik's internal crypto key | Authentik profile |
+| `AK_DB_PASSWORD` | `token_hex(16)` | Authentik's Postgres password | Authentik profile |
+| `AK_BOOTSTRAP_TOKEN` | `token_hex(24)` | Authentik's initial API token | Authentik profile |
+| `KC_ADMIN_PASSWORD` / `AK_ADMIN_PASSWORD` | your choice (strong) | IdP admin login | respective profile |
+
+(Only generate the rows for the IdP profile you're deploying.)
+
+#### Where `OIDC_CLIENT_SECRET` comes from
+
+This is one secret you create and put in **two places** so the app and the IdP
+agree on it. Generate it once, then:
+
+- **Keycloak** — the secret lives in the `"secret"` field of the `django-app`
+  client in `keycloak/realm-demo.json`. Edit that field to your generated value,
+  **and** set the same value as `OIDC_CLIENT_SECRET` in Dokploy. (Alternative:
+  leave the realm file alone, let Keycloak generate its own secret on import,
+  then copy it from the admin UI under **Clients → django-app → Credentials**
+  into `OIDC_CLIENT_SECRET`.)
+- **Authentik** — the blueprint reads the secret directly from the
+  `OIDC_CLIENT_SECRET` env var (the `!Env [OIDC_CLIENT_SECRET, ...]` line), so
+  you set it **once** in Dokploy and both the app and Authentik's provider use
+  it. Nothing to copy by hand.
+
+#### About `AK_SECRET_KEY` (Authentik only)
+
+`AK_SECRET_KEY` is Authentik's own internal signing/encryption key — unrelated
+to OIDC. Generate a fresh 64-hex-character value (`token_hex(32)`) for staging;
+do not reuse the repo's demo value. **Do not change it after first boot** —
+rotating it invalidates existing sessions and any secrets Authentik has
+encrypted with it.
+
+#### `OIDC_ISSUER` must use the public IdP domain
 
 - Keycloak: `https://id.staging.example.com/realms/demo`
 - Authentik: `https://id.staging.example.com/application/o/django`
+
+> The demo secrets pre-filled in the repo's `.env.*`, `realm-demo.json`, and
+> blueprint exist only so local testing works out of the box. Always replace
+> them with freshly generated values for any deployment beyond your laptop.
 
 ### 7.4 Domains (TLS)
 
