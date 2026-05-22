@@ -26,7 +26,7 @@ def refresh_access_token(auth_session: dict[str, Any]) -> dict[str, Any] | None:
     try:
         from lib.auth import oauth
 
-        metadata = oauth.zitadel.load_server_metadata()
+        metadata = oauth.oidc.load_server_metadata()
         token_endpoint = metadata.get("token_endpoint")
 
         token_data = {
@@ -34,10 +34,10 @@ def refresh_access_token(auth_session: dict[str, Any]) -> dict[str, Any] | None:
             "refresh_token": refresh_token,
         }
 
-        response = oauth.zitadel._client.post(
+        response = oauth.oidc._client.post(
             token_endpoint,
             data=token_data,
-            auth=(oauth.zitadel.client_id, oauth.zitadel.client_secret),
+            auth=(oauth.oidc.client_id, oauth.oidc.client_secret),
         )
         response.raise_for_status()
         new_token = response.json()

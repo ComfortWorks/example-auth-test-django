@@ -1,3 +1,3 @@
-"""Spec package for Django ZITADEL authentication."""
+"""Spec package for Django OIDC authentication."""
 
 from __future__ import annotations

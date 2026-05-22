@@ -18,7 +18,7 @@ def home(request: HttpRequest) -> HttpResponse:
         "index.html",
         {
             "isAuthenticated": bool(session_data),
-            "loginUrl": "/auth/signin/zitadel",
+            "loginUrl": "/auth/signin/oidc",
         },
     )
 

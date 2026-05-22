@@ -1,3 +1,3 @@
-"""Library modules for ZITADEL authentication."""
+"""Library modules for OIDC authentication."""
 
 from __future__ import annotations

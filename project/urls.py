@@ -1,4 +1,4 @@
-"""URL configuration for ZITADEL authentication project."""
+"""URL configuration for the OIDC authentication project."""
 
 from __future__ import annotations
 

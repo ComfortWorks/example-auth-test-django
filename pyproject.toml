@@ -1,7 +1,7 @@
 [project]
 name = "example-django-auth"
 version = "0.0.0"
-description = "Django application demonstrating ZITADEL authentication with PKCE using Authlib"
+description = "Django application demonstrating OIDC authentication with PKCE using Authlib (Keycloak / Authentik / ZITADEL)"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,7 +9,9 @@ dependencies = [
   "Authlib>=1.6.12,<2.0.0",
   "python-dotenv>=1.2.2,<2.0.0",
   "requests>=2.32.0,<3.0.0",
-  "Jinja2>=3.0.0,<4.0.0"
+  "Jinja2>=3.0.0,<4.0.0",
+  "gunicorn>=23.0.0,<24.0.0",
+  "whitenoise>=6.8.0,<7.0.0"
 ]
 
 [project.urls]
@@ -77,6 +79,8 @@ ignore = ["S101"]  # Ignore assert statements
 ignore_unused = [
   "fawltydeps",
   "Jinja2",
+  "gunicorn",
+  "whitenoise",
   "requests",
   "pytest-cov",
   "pytest",

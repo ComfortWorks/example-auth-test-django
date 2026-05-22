@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 urlpatterns = [
     path("csrf", cast("ViewFunc", auth.csrf), name="csrf"),
     path("signin", cast("ViewFunc", auth.signin), name="signin"),
-    path("signin/zitadel", cast("ViewFunc", auth.signin_zitadel), name="signin_zitadel"),
+    path("signin/oidc", cast("ViewFunc", auth.signin_oidc), name="signin_oidc"),
     path("callback", cast("ViewFunc", auth.callback), name="callback"),
     path("logout", cast("ViewFunc", auth.logout), name="logout"),
     path("logout/callback", cast("ViewFunc", auth.logout_callback), name="logout_callback"),

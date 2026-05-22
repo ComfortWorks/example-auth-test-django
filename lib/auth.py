@@ -1,4 +1,4 @@
-"""ZITADEL authentication routes using Authlib Django integration."""
+"""OIDC authentication routes using Authlib Django integration."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from django.views.decorators.http import require_GET, require_POST
 from lib.config import config
 from lib.guard import require_auth
 from lib.message import get_message
-from lib.scopes import ZITADEL_SCOPES
+from lib.scopes import OIDC_SCOPES
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +28,14 @@ def get_well_known_url(domain: str) -> str:
 
 def init_oauth() -> None:
     """Initialize OAuth client with Django configuration."""
+    metadata_url = config.OIDC_DISCOVERY_URL or get_well_known_url(config.OIDC_ISSUER)
     oauth.register(
-        name="zitadel",
-        client_id=config.ZITADEL_CLIENT_ID,
-        client_secret=config.ZITADEL_CLIENT_SECRET,
-        server_metadata_url=get_well_known_url(config.ZITADEL_DOMAIN),
+        name="oidc",
+        client_id=config.OIDC_CLIENT_ID,
+        client_secret=config.OIDC_CLIENT_SECRET,
+        server_metadata_url=metadata_url,
         client_kwargs={
-            "scope": ZITADEL_SCOPES,
+            "scope": OIDC_SCOPES,
             "code_challenge_method": "S256",
         },
     )
@@ -57,9 +58,9 @@ def signin(request: HttpRequest) -> HttpResponse:
     error = request.GET.get("error")
     providers = [
         {
-            "id": "zitadel",
-            "name": "ZITADEL",
-            "signinUrl": "/auth/signin/zitadel",
+            "id": "oidc",
+            "name": config.OIDC_PROVIDER_NAME,
+            "signinUrl": "/auth/signin/oidc",
         }
     ]
     return render(
@@ -67,14 +68,14 @@ def signin(request: HttpRequest) -> HttpResponse:
         "auth/signin.html",
         {
             "providers": providers,
-            "callbackUrl": request.GET.get("callbackUrl") or config.ZITADEL_POST_LOGIN_URL,
+            "callbackUrl": request.GET.get("callbackUrl") or config.OIDC_POST_LOGIN_URL,
             "message": get_message(error, "signin-error") if error else None,
         },
     )
 
 
 @require_POST
-def signin_zitadel(request: HttpRequest) -> HttpResponse:
+def signin_oidc(request: HttpRequest) -> HttpResponse:
     """Initiate OAuth 2.0 authorization flow with PKCE."""
     csrf_token = request.POST.get("csrfToken")
     stored_token = request.session.get("csrf_token")
@@ -84,20 +85,20 @@ def signin_zitadel(request: HttpRequest) -> HttpResponse:
         return redirect("/auth/signin?error=verification")
 
     request.session.pop("csrf_token", None)
-    request.session["post_login_url"] = request.POST.get("callbackUrl", config.ZITADEL_POST_LOGIN_URL)
+    request.session["post_login_url"] = request.POST.get("callbackUrl", config.OIDC_POST_LOGIN_URL)
 
-    redirect_uri = config.ZITADEL_CALLBACK_URL
+    redirect_uri = config.OIDC_CALLBACK_URL
     logger.info("Initiating OAuth authorization flow")
-    return cast(HttpResponse, oauth.zitadel.authorize_redirect(request, redirect_uri))
+    return cast(HttpResponse, oauth.oidc.authorize_redirect(request, redirect_uri))
 
 
 @require_GET
 def callback(request: HttpRequest) -> HttpResponse:
-    """Handle OAuth 2.0 callback from ZITADEL."""
+    """Handle OAuth 2.0 callback from the IdP."""
     try:
-        token = oauth.zitadel.authorize_access_token(request)
+        token = oauth.oidc.authorize_access_token(request)
 
-        userinfo = oauth.zitadel.userinfo(token=token)  # Add token parameter
+        userinfo = oauth.oidc.userinfo(token=token)  # Add token parameter
 
         old_session_data = dict(request.session)
         request.session.clear()
@@ -113,7 +114,7 @@ def callback(request: HttpRequest) -> HttpResponse:
             "expires_at": token.get("expires_at"),
         }
 
-        post_login_url = request.session.pop("post_login_url", config.ZITADEL_POST_LOGIN_URL)
+        post_login_url = request.session.pop("post_login_url", config.OIDC_POST_LOGIN_URL)
         logger.info(f"Authentication successful for user: {userinfo.get('sub')}")
         return redirect(post_login_url)
 
@@ -124,18 +125,18 @@ def callback(request: HttpRequest) -> HttpResponse:
 
 @require_POST
 def logout(request: HttpRequest) -> HttpResponse:
-    """Initiate logout flow with ZITADEL."""
+    """Initiate logout flow with the IdP."""
     try:
         logout_state = secrets.token_urlsafe(32)
         request.session["logout_state"] = logout_state
 
-        metadata = oauth.zitadel.load_server_metadata()
+        metadata = oauth.oidc.load_server_metadata()
         end_session_endpoint = metadata.get("end_session_endpoint")
 
         if end_session_endpoint:
             params = {
-                "post_logout_redirect_uri": config.ZITADEL_POST_LOGOUT_URL,
-                "client_id": config.ZITADEL_CLIENT_ID,
+                "post_logout_redirect_uri": config.OIDC_POST_LOGOUT_URL,
+                "client_id": config.OIDC_CLIENT_ID,
                 "state": logout_state,
             }
             logout_url = f"{end_session_endpoint}?{urlencode(params)}"
@@ -143,17 +144,17 @@ def logout(request: HttpRequest) -> HttpResponse:
             return redirect(logout_url)
 
         request.session.clear()
-        return redirect(config.ZITADEL_POST_LOGOUT_URL)
+        return redirect(config.OIDC_POST_LOGOUT_URL)
 
     except Exception as e:
         logger.exception("Logout initiation failed: %s", str(e))
         request.session.clear()
-        return redirect(config.ZITADEL_POST_LOGOUT_URL)
+        return redirect(config.OIDC_POST_LOGOUT_URL)
 
 
 @require_GET
 def logout_callback(request: HttpRequest) -> HttpResponse:
-    """Handle logout callback from ZITADEL with state validation."""
+    """Handle logout callback from the IdP with state validation."""
     received_state = request.GET.get("state")
     stored_state = request.session.get("logout_state")
 
@@ -191,7 +192,7 @@ def error_page(request: HttpRequest) -> HttpResponse:
 @require_GET
 @require_auth
 def userinfo(request: HttpRequest) -> JsonResponse:
-    """Fetch fresh user information from ZITADEL."""
+    """Fetch fresh user information from the IdP."""
     auth_session = request.session.get("auth_session", {})
     access_token = auth_session.get("access_token")
 
@@ -200,11 +201,11 @@ def userinfo(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "No access token available"}, status=401)
 
     try:
-        metadata = oauth.zitadel.load_server_metadata()
+        metadata = oauth.oidc.load_server_metadata()
         userinfo_endpoint = metadata.get("userinfo_endpoint")
 
         headers = {"Authorization": f"Bearer {access_token}"}
-        response = oauth.zitadel._client.get(userinfo_endpoint, headers=headers)
+        response = oauth.oidc._client.get(userinfo_endpoint, headers=headers)
         response.raise_for_status()
 
         logger.info("Userinfo fetched successfully")

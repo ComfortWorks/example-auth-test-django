@@ -1,0 +1,48 @@
+# Authentik blueprint: auto-provision an OIDC provider + application for the
+# Django demo app. Applied automatically on startup (mounted into
+# /blueprints/custom and reconciled by the worker).
+#
+# Environment-driven so the SAME file works locally and on a staging/prod host:
+#   APP_BASE_URL       public base URL of the Django app
+#                      (default http://localhost:3001 for local compose)
+#   OIDC_CLIENT_SECRET client secret shared with the Django app
+#
+# Targets a recent Authentik release (2024.6+ structured redirect_uris).
+version: 1
+metadata:
+  name: Django OIDC Demo
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: provider
+    identifiers:
+      name: django-provider
+    attrs:
+      client_type: confidential
+      client_id: django-app
+      client_secret:
+        !Env [OIDC_CLIENT_SECRET, "07bbe54c1d81ca9458f772fed8a3bea5520efbdc8357d527"]
+      # Default flows shipped with every Authentik install.
+      authorization_flow:
+        !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow:
+        !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["%s/auth/callback", !Env [APP_BASE_URL, "http://localhost:3001"]]
+        - matching_mode: strict
+          url: !Format ["%s/auth/logout/callback", !Env [APP_BASE_URL, "http://localhost:3001"]]
+      # Standard OIDC scope mappings that ship by default.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, offline_access]]
+      signing_key:
+        !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+  - model: authentik_core.application
+    identifiers:
+      slug: django
+    attrs:
+      name: Django OIDC Demo
+      slug: django
+      provider: !KeyOf provider
