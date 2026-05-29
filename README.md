@@ -502,11 +502,13 @@ all of that; the steps below are what *you* still control.
 
 **Step 1 — Set domain, masterkey, DB password, and admin (env).** In the
 Environment tab set `IDP_DOMAIN`, `ZITADEL_MASTERKEY` (exactly 32 chars — never
-changes), `ZITADEL_DB_PASSWORD`, and `ZITADEL_ADMIN_USERNAME` /
-`ZITADEL_ADMIN_PASSWORD` / `ZITADEL_ADMIN_EMAIL`. The external-URL settings
-ZITADEL is famously strict about (`ZITADEL_EXTERNALDOMAIN`, `…PORT=443`,
-`…SECURE=true`, `ZITADEL_TLS_ENABLED=false`) are already wired to your
-`IDP_DOMAIN` in the compose. If they don't match the real public endpoint,
+changes), `ZITADEL_DB_PASSWORD`, `ZITADEL_ADMIN_USERNAME` /
+`ZITADEL_ADMIN_PASSWORD` / `ZITADEL_ADMIN_EMAIL`, and `ZITADEL_PAT_EXPIRATION`
+(an RFC3339 timestamp, e.g. `2099-01-01T00:00:00Z` — it is supplied as an env var
+on purpose; see the troubleshooting note on timestamp parsing in §10). The
+external-URL settings ZITADEL is famously strict about (`ZITADEL_EXTERNALDOMAIN`,
+`…PORT=443`, `…SECURE=true`, `ZITADEL_TLS_ENABLED=false`) are already wired to
+your `IDP_DOMAIN` in the compose. If they don't match the real public endpoint,
 ZITADEL returns **"Instance not found"** — that error almost always means an
 `EXTERNAL*` mismatch, not a genuinely missing instance.
 
@@ -698,7 +700,7 @@ is deferred until that comparison is done.
 | ZITADEL admin login rejected | Wrong login name. It's `<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>` (org-domain suffix), **not** `@<IDP_DOMAIN>` (§7.9 Step 3). Also confirm the password meets complexity. The bootstrap is one-shot — wipe `zitadel-db-data` to reset it. |
 | ZITADEL Console blank / gRPC or network errors | The API isn't being reached over HTTP/2. Confirm `traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c` is present and applied (Dokploy **Preview Compose**), and that you did **not** also add a domain in the UI (which creates a conflicting plain-HTTP router) (§7.9 Step 2). |
 | ZITADEL login page 404s / `/` doesn't load | Path-routing priorities or the API↔Login PAT bridge. Check both `zitadel-api` and `zitadel-login` are healthy and share the `zitadel-bootstrap` volume; the login router (`/ui/v2/login`, priority 250) and root rewrite (priority 400) must outrank the API catch-all (100). |
-| ZITADEL `invalid_client` at token exchange | App registered with **PKCE** (secret-less) but it sends a secret — register it as **Basic Auth**; or `OIDC_CLIENT_SECRET` doesn't match the Console value (copy it again, redeploy `web`) (§7.9 Step 4). |
+| ZITADEL `start-from-init` fails: `'FirstInstance.Org.LoginClient.Pat.ExpirationDate' parsing time … cannot parse` | The PAT expiry reached ZITADEL as a non-RFC3339 string (e.g. `2099-01-01 00:00:00 +0000 UTC`) because a bare timestamp in the compose YAML was coerced to a Go time and re-stringified. Supply it via the `ZITADEL_PAT_EXPIRATION` **env var** (`2099-01-01T00:00:00Z`) referenced as `${ZITADEL_PAT_EXPIRATION}` in the compose — env values aren't coerced (§7.9 Step 1). No DB wipe needed; the instance wasn't created yet, so just fix and redeploy. |
 
 ---
 
