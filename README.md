@@ -46,8 +46,7 @@ sequenceDiagram
     U->>A: GET /profile (no session yet)
     A-->>U: redirect to sign-in
     U->>A: POST /auth/signin/oidc
-    Note over A: generate PKCE verifier + challenge;
-    read endpoints from discovery doc
+    Note over A: generate PKCE verifier + challenge (read endpoints from discovery doc)
     A-->>U: redirect to IdP /authorize (with code_challenge)
     U->>I: follow redirect to /authorize
     I-->>U: hosted login page
@@ -58,8 +57,7 @@ sequenceDiagram
     I-->>A: id_token + access_token (+ refresh_token if offline_access)
     A->>I: GET /userinfo (access_token)
     I-->>A: claims (sub, email, name, ...)
-    Note over A: validate iss & aud,
-    store signed-cookie session
+    Note over A: validate iss & aud, store signed-cookie session
     A-->>U: redirect to /profile (authenticated)
 
     Note over U,I: Logout
@@ -67,6 +65,7 @@ sequenceDiagram
     A-->>U: redirect to IdP end_session_endpoint
     U->>I: GET /end_session
     I-->>U: redirect back to app post-logout URL
+  
 ```
 
 ### The one concept that trips everyone up: issuer consistency
