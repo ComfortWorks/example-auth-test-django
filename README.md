@@ -46,7 +46,8 @@ sequenceDiagram
     U->>A: GET /profile (no session yet)
     A-->>U: redirect to sign-in
     U->>A: POST /auth/signin/oidc
-    Note over A: generate PKCE verifier + challenge;<br/>read endpoints from discovery doc
+    Note over A: generate PKCE verifier + challenge;
+    read endpoints from discovery doc
     A-->>U: redirect to IdP /authorize (with code_challenge)
     U->>I: follow redirect to /authorize
     I-->>U: hosted login page
