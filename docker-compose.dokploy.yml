@@ -340,12 +340,20 @@ services:
       - traefik.enable=true
       - traefik.docker.network=dokploy-network
       - traefik.http.services.zitadel-login.loadbalancer.server.port=3000         # plain HTTP, NO h2c
-      - traefik.http.middlewares.zitadel-root-rewrite.replacepath.path=/ui/v2/login/
-      # bare / -> rewrite to login                 priority 400
+      # bare / -> 302 redirect to the Console. Hitting the login UI directly (no
+      # auth request) strands you on /ui/v2/login/signedin; sending root to the
+      # Console makes IT initiate the auth request, so login returns there.
+      # End users are unaffected: they always arrive via an auth request from the
+      # app (/ui/v2/login/login?authRequest=...), never at the bare root.
+      # Static replacement (no regex backreference) => no $$ escaping needed;
+      # ${IDP_DOMAIN} is interpolated by Compose. The router below already filters
+      # to Path(`/`), so `.*` only ever matches the root URL.
+      - traefik.http.middlewares.zitadel-root-redirect.redirectregex.regex=.*
+      - traefik.http.middlewares.zitadel-root-redirect.redirectregex.replacement=https://${IDP_DOMAIN}/ui/console/
       - traefik.http.routers.zitadel-root.rule=Host(`${IDP_DOMAIN}`) && Path(`/`)
       - traefik.http.routers.zitadel-root.entrypoints=websecure
       - traefik.http.routers.zitadel-root.tls.certresolver=letsencrypt
-      - traefik.http.routers.zitadel-root.middlewares=zitadel-root-rewrite
+      - traefik.http.routers.zitadel-root.middlewares=zitadel-root-redirect
       - traefik.http.routers.zitadel-root.service=zitadel-login
       - traefik.http.routers.zitadel-root.priority=400
       # /ui/v2/login -> Login                      priority 250

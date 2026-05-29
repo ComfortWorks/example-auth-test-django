@@ -520,7 +520,8 @@ priority-ordered set of routers that split the single hostname:
 
 | Path | Backend | Why |
 |---|---|---|
-| `/`, `/ui/v2/login` | `zitadel-login` (:3000, http) | the Login V2 UI |
+| `/` | (302 redirect) | bare root → `/ui/console/` so the Console drives the auth request |
+| `/ui/v2/login` | `zitadel-login` (:3000, http) | the Login V2 UI |
 | `/api` (prefix stripped) | `zitadel-api` (:8080, h2c) | API alias |
 | everything else | `zitadel-api` (:8080, h2c) | discovery, token, OIDC, Console |
 
@@ -534,15 +535,22 @@ setup — watch `zitadel-api` logs for readiness; `zitadel-login` only goes heal
 after the API mints its service-account PAT into the shared `zitadel-bootstrap`
 volume.
 
+Open the Console at `https://<IDP_DOMAIN>/ui/console/` (the bare root redirects
+here automatically — see §7.9 Step 2). Don't log in from the bare login page
+directly: with no auth request in flight, ZITADEL strands you on
+`/ui/v2/login/signedin` instead of taking you to the Console (§10).
+
 > **The #1 ZITADEL login mistake.** Your admin login name is **not**
 > `admin@<IDP_DOMAIN>`. With the default settings the username is suffixed by the
 > *organization* domain, and the default org "ZITADEL" becomes `zitadel`. So you
-> log in at `https://<IDP_DOMAIN>/ui/console` as
+> log in at `https://<IDP_DOMAIN>/ui/console/` as
 > **`<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>`** — e.g.
-> `admin@zitadel.id.staging.example.com` — with `ZITADEL_ADMIN_PASSWORD`. The
-> password must satisfy default complexity (≥8 chars, upper + lower + number +
-> symbol) or setup rejects it. The bootstrap is **one-shot** (only on an empty
-> DB); to change the admin later, wipe the `zitadel-db-data` volume and redeploy.
+> `admin@zitadel.id.staging.example.com` — with `ZITADEL_ADMIN_PASSWORD`. (If
+> your `IDP_DOMAIN` itself starts with `zitadel.`, the login name will contain a
+> doubled `zitadel.zitadel.` — that's correct, not a typo.) The password must
+> satisfy default complexity (≥8 chars, upper + lower + number + symbol) or setup
+> rejects it. The bootstrap is **one-shot** (only on an empty DB); to change the
+> admin later, wipe the `zitadel-db-data` volume and redeploy.
 
 **Step 4 — Create the Django app and wire its credentials.** ZITADEL has no
 import file, so onboard the app by hand (full general procedure in §7.10):
@@ -699,8 +707,10 @@ is deferred until that comparison is done.
 | ZITADEL: "Instance not found" | `ZITADEL_EXTERNALDOMAIN`/`EXTERNALPORT`/`EXTERNALSECURE` don't match the public URL. They're wired to `IDP_DOMAIN`:443:true in the compose — confirm `IDP_DOMAIN` is set and you're reaching it over HTTPS (§7.9 Step 1). |
 | ZITADEL admin login rejected | Wrong login name. It's `<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>` (org-domain suffix), **not** `@<IDP_DOMAIN>` (§7.9 Step 3). Also confirm the password meets complexity. The bootstrap is one-shot — wipe `zitadel-db-data` to reset it. |
 | ZITADEL Console blank / gRPC or network errors | The API isn't being reached over HTTP/2. Confirm `traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c` is present and applied (Dokploy **Preview Compose**), and that you did **not** also add a domain in the UI (which creates a conflicting plain-HTTP router) (§7.9 Step 2). |
-| ZITADEL login page 404s / `/` doesn't load | Path-routing priorities or the API↔Login PAT bridge. Check both `zitadel-api` and `zitadel-login` are healthy and share the `zitadel-bootstrap` volume; the login router (`/ui/v2/login`, priority 250) and root rewrite (priority 400) must outrank the API catch-all (100). |
+| ZITADEL login page 404s / `/` doesn't load | Path-routing priorities or the API↔Login PAT bridge. Check both `zitadel-api` and `zitadel-login` are healthy and share the `zitadel-bootstrap` volume; the login router (`/ui/v2/login`, priority 250) and root redirect (priority 400) must outrank the API catch-all (100). |
 | ZITADEL `start-from-init` fails: `'FirstInstance.Org.LoginClient.Pat.ExpirationDate' parsing time … cannot parse` | The PAT expiry reached ZITADEL as a non-RFC3339 string (e.g. `2099-01-01 00:00:00 +0000 UTC`) because a bare timestamp in the compose YAML was coerced to a Go time and re-stringified. Supply it via the `ZITADEL_PAT_EXPIRATION` **env var** (`2099-01-01T00:00:00Z`) referenced as `${ZITADEL_PAT_EXPIRATION}` in the compose — env values aren't coerced (§7.9 Step 1). No DB wipe needed; the instance wasn't created yet, so just fix and redeploy. |
+| ZITADEL: after login you land on `/ui/v2/login/signedin` and never reach the Console | You opened the login page directly (e.g. the bare domain), so there was no auth request to return you to. Go to `https://<IDP_DOMAIN>/ui/console/` — you're already signed in, so it drops you into the Console. The shipped compose redirects the bare root there automatically; if you still land on `signedin`, you're on an old deploy without the root-redirect label (§7.9 Step 2). |
+| ZITADEL `invalid_client` at token exchange | App registered with **PKCE** (secret-less) but it sends a secret — register it as **Basic Auth**; or `OIDC_CLIENT_SECRET` doesn't match the Console value (copy it again, redeploy `web`) (§7.9 Step 4). |
 
 ---
 
