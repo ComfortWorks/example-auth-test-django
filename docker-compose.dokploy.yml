@@ -3,11 +3,15 @@
 # Differences from the local docker-compose.yml:
 #   - No host port bindings. Traefik (managed by Dokploy) owns 80/443; we only
 #     `expose` internal ports and attach web-facing services to dokploy-network.
-#     Assign public domains in the Dokploy UI (Domains tab) — it injects the
-#     Traefik labels for you. Map:
+#     For web/keycloak/authentik, assign public domains in the Dokploy UI
+#     (Domains tab) — it injects the Traefik labels for you. Map:
 #         web        -> ${APP_DOMAIN}  port 3000
 #         keycloak   -> ${IDP_DOMAIN}  port 8080   (keycloak profile)
 #         authentik  -> ${IDP_DOMAIN}  port 9000   (authentik profile)
+#     ZITADEL is the EXCEPTION: do NOT add its domain in the UI. zitadel-api and
+#     zitadel-login below carry hand-written Traefik labels (h2c on the API,
+#     path-based routing across the two backends). Just set IDP_DOMAIN; see
+#     GUIDE.md §7.9.
 #   - The app runs under gunicorn with PY_ENV=production (set via entrypoint).
 #   - All secrets/domains come from Dokploy environment variables (see
 #     .env.dokploy.example).
@@ -15,10 +19,11 @@
 # Deploy ONE identity provider per stack:
 #   docker compose -f docker-compose.dokploy.yml --profile keycloak  up -d
 #   docker compose -f docker-compose.dokploy.yml --profile authentik up -d
+#   docker compose -f docker-compose.dokploy.yml --profile zitadel   up -d
 # IMPORTANT (Dokploy): there is no --profile CLI flag in the UI. You MUST set
-#   COMPOSE_PROFILES=keycloak   (or: authentik)
+#   COMPOSE_PROFILES=keycloak   (or: authentik, or: zitadel)
 # in the Environment tab, or NO services start and the deploy fails with
-# "No such container: select-a-container". To run both, create two separate
+# "No such container: select-a-container". To run more than one, create separate
 # Compose services, one per profile.
 
 networks:
@@ -31,6 +36,8 @@ volumes:
   keycloak-db-data:
   authentik-db-data:
   authentik-redis-data:
+  zitadel-db-data:
+  zitadel-bootstrap:        # shared API<->Login PAT bridge (see ZITADEL block)
 
 services:
   # ----------------------------------------------------------------------- #
@@ -38,7 +45,7 @@ services:
   # ----------------------------------------------------------------------- #
   web:
     build: .
-    profiles: [keycloak, authentik]
+    profiles: [keycloak, authentik, zitadel]
     restart: unless-stopped
     networks: [dokploy-network, internal]
     expose:
@@ -55,6 +62,7 @@ services:
       # Public issuer of the chosen IdP, e.g.
       #   Keycloak : https://${IDP_DOMAIN}/realms/demo
       #   Authentik: https://${IDP_DOMAIN}/application/o/django
+      #   ZITADEL  : https://${IDP_DOMAIN}            (host root, no path)
       OIDC_ISSUER: ${OIDC_ISSUER}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
@@ -206,3 +214,143 @@ services:
         condition: service_healthy
       authentik-redis:
         condition: service_healthy
+  # ----------------------------------------------------------------------- #
+  # ZITADEL  (api + login + postgres; profile: zitadel)                      #
+  #                                                                          #
+  # Unlike Keycloak/Authentik this is TWO web backends behind one domain,    #
+  # split by path via the hand-written Traefik labels below:                 #
+  #   zitadel-api   (Go,      :8080, h2c)  -> /api, and everything that is    #
+  #                                          NOT the login UI or bare /       #
+  #   zitadel-login (Next.js, :3000, http) -> /  and /ui/v2/login            #
+  # Do NOT assign this domain in the Dokploy UI — these labels own routing.  #
+  # `redirect-to-https@file` is Dokploy's global HTTP->HTTPS middleware.     #
+  # ----------------------------------------------------------------------- #
+  zitadel-db:
+    image: postgres:17-alpine        # ZITADEL upstream pins PG17 (others here use 16)
+    profiles: [zitadel]
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: zitadel
+      POSTGRES_USER: zitadel
+      POSTGRES_PASSWORD: ${ZITADEL_DB_PASSWORD}
+    volumes:
+      - zitadel-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zitadel -d zitadel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  zitadel-api:
+    image: ghcr.io/zitadel/zitadel:v4.13.0
+    profiles: [zitadel]
+    restart: unless-stopped
+    user: "0"                          # upstream runs as root (bootstrap-volume perms)
+    command: start-from-init --masterkey "${ZITADEL_MASTERKEY}"
+    networks: [dokploy-network, internal]
+    environment:
+      ZITADEL_PORT: "8080"
+      ZITADEL_EXTERNALDOMAIN: ${IDP_DOMAIN}
+      ZITADEL_EXTERNALPORT: "443"                  # public port = Traefik 443
+      ZITADEL_EXTERNALSECURE: "true"               # public URL is https
+      ZITADEL_TLS_ENABLED: "false"                 # TLS terminated at Traefik
+      ZITADEL_DATABASE_POSTGRES_DSN: postgresql://zitadel:${ZITADEL_DB_PASSWORD}@zitadel-db:5432/zitadel?sslmode=disable
+      # --- First-instance bootstrap (ONE-SHOT; applied only on an empty DB) ---
+      # Login name to use is <username>@zitadel.<IDP_DOMAIN>  (org "ZITADEL" => "zitadel").
+      # Password must satisfy default complexity: >=8 chars, upper+lower+number+symbol.
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_ADMIN_USERNAME}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_PASSWORD}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: ${ZITADEL_ADMIN_EMAIL}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+      # --- Login V2 wiring: API mints a PAT to the shared volume; Login reads it ---
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Automatically Initialized IAM_LOGIN_CLIENT
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "true"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: https://${IDP_DOMAIN}:443/ui/v2/login/
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: https://${IDP_DOMAIN}:443/ui/v2/login/login?authRequest=
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: https://${IDP_DOMAIN}:443/ui/v2/login/logout?post_logout_redirect=
+    volumes:
+      - zitadel-bootstrap:/zitadel/bootstrap:rw
+    expose:
+      - "8080"
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 20s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.zitadel-api.loadbalancer.server.port=8080
+      - traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c          # <-- the h2c label
+      - traefik.http.middlewares.zitadel-strip-api.stripprefix.prefixes=/api
+      - traefik.http.middlewares.zitadel-strip-api.stripprefix.forceSlash=false
+      # /api alias -> API (strip /api)                 priority 200
+      - traefik.http.routers.zitadel-api-alias.rule=Host(`${IDP_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.zitadel-api-alias.entrypoints=websecure
+      - traefik.http.routers.zitadel-api-alias.tls.certresolver=letsencrypt
+      - traefik.http.routers.zitadel-api-alias.middlewares=zitadel-strip-api
+      - traefik.http.routers.zitadel-api-alias.service=zitadel-api
+      - traefik.http.routers.zitadel-api-alias.priority=200
+      # catch-all -> API (everything except login UI, /api, bare /)   priority 100
+      - traefik.http.routers.zitadel-canonical.rule=Host(`${IDP_DOMAIN}`) && !PathPrefix(`/ui/v2/login`) && !PathPrefix(`/api`) && !Path(`/`)
+      - traefik.http.routers.zitadel-canonical.entrypoints=websecure
+      - traefik.http.routers.zitadel-canonical.tls.certresolver=letsencrypt
+      - traefik.http.routers.zitadel-canonical.service=zitadel-api
+      - traefik.http.routers.zitadel-canonical.priority=100
+      # HTTP -> HTTPS redirect (single catch-all on the web entrypoint)
+      - traefik.http.routers.zitadel-redirect.rule=Host(`${IDP_DOMAIN}`)
+      - traefik.http.routers.zitadel-redirect.entrypoints=web
+      - traefik.http.routers.zitadel-redirect.middlewares=redirect-to-https@file
+      - traefik.http.routers.zitadel-redirect.service=zitadel-api
+
+  zitadel-login:
+    image: ghcr.io/zitadel/zitadel-login:v4.13.0
+    profiles: [zitadel]
+    restart: unless-stopped
+    user: "0"
+    networks: [dokploy-network, internal]
+    environment:
+      ZITADEL_API_URL: http://zitadel-api:8080       # internal; API serves HTTP/1.1 + h2c on same port
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel/bootstrap/login-client.pat
+      CUSTOM_REQUEST_HEADERS: Host:${IDP_DOMAIN},X-Forwarded-Proto:https
+    volumes:
+      - zitadel-bootstrap:/zitadel/bootstrap:ro
+    expose:
+      - "3000"
+    depends_on:
+      zitadel-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "node /app/healthcheck.mjs http://localhost:3000/ui/v2/login/healthy"]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 20s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.zitadel-login.loadbalancer.server.port=3000         # plain HTTP, NO h2c
+      - traefik.http.middlewares.zitadel-root-rewrite.replacepath.path=/ui/v2/login/
+      # bare / -> rewrite to login                 priority 400
+      - traefik.http.routers.zitadel-root.rule=Host(`${IDP_DOMAIN}`) && Path(`/`)
+      - traefik.http.routers.zitadel-root.entrypoints=websecure
+      - traefik.http.routers.zitadel-root.tls.certresolver=letsencrypt
+      - traefik.http.routers.zitadel-root.middlewares=zitadel-root-rewrite
+      - traefik.http.routers.zitadel-root.service=zitadel-login
+      - traefik.http.routers.zitadel-root.priority=400
+      # /ui/v2/login -> Login                      priority 250
+      - traefik.http.routers.zitadel-login.rule=Host(`${IDP_DOMAIN}`) && PathPrefix(`/ui/v2/login`)
+      - traefik.http.routers.zitadel-login.entrypoints=websecure
+      - traefik.http.routers.zitadel-login.tls.certresolver=letsencrypt
+      - traefik.http.routers.zitadel-login.service=zitadel-login
+      - traefik.http.routers.zitadel-login.priority=250

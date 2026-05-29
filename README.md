@@ -155,6 +155,9 @@ No code changes. Create an `.env.zitadel` with your ZITADEL values
 add a `web-zitadel` service that uses it, and you're done. ZITADEL's issuer is at
 the host root, so discovery "just works".
 
+> The line above targets **ZITADEL Cloud**. For a **self-hosted** ZITADEL (the
+> staging comparison target — API + Login + Postgres on Dokploy), see §7.9.
+
 ### 5.6 Running the app without Docker (optional)
 
 ```bash
@@ -181,8 +184,15 @@ uv run pytest                # run the test suite
   hardcoded values are fallbacks only). The client secret passed there must equal
   the app's `OIDC_CLIENT_SECRET` (locally, `.env.authentik`'s value), or token
   exchange fails with `invalid_client`.
-- **ZITADEL** — create a Web app (Auth Code + PKCE) in the console and register
-  the redirect/post-logout URIs manually; there's no import file.
+- **ZITADEL** — self-hosted as `zitadel-api` + `zitadel-login` + `zitadel-db`
+  (see §7.9). The instance and its admin are bootstrapped once from
+  `ZITADEL_FIRSTINSTANCE_*` env on first boot; after that you create the OIDC
+  application **by hand in the Console** (a Web app, **Basic Auth** to match this
+  app's client secret) and copy the generated client ID + secret into the env.
+  There is no realm-import or blueprint equivalent that provisions the app on a
+  fresh boot — so manual onboarding is ZITADEL's one ergonomic step back from the
+  other two here (a **small** disadvantage: a few clicks per app, §7.10), the
+  trade for its more modern, API-first core.
 
 ---
 
@@ -219,20 +229,20 @@ What you cannot do is put both on the same host (e.g. both on
    fork as the source → set the compose path to `docker-compose.dokploy.yml`.
 3. **Set the active profile (required).** Every service in
    `docker-compose.dokploy.yml` is gated behind a Compose profile
-   (`keycloak` or `authentik`). Compose only starts services whose profile is
-   active, so you **must** tell Dokploy which one to use — otherwise *zero*
-   services match and the deploy creates no containers (this is the usual cause
-   of the `No such container: select-a-container` error). Locally you pass
+   (`keycloak`, `authentik`, or `zitadel`). Compose only starts services whose
+   profile is active, so you **must** tell Dokploy which one to use — otherwise
+   *zero* services match and the deploy creates no containers (this is the usual
+   cause of the `No such container: select-a-container` error). Locally you pass
    `--profile keycloak` on the CLI, but in Dokploy there's no CLI flag, so set it
    as an environment variable in the **Environment** tab (see §7.3):
 
    ```
-   COMPOSE_PROFILES=keycloak     # or: authentik
+   COMPOSE_PROFILES=keycloak     # or: authentik, or: zitadel
    ```
 
-   Deploy one IdP per stack; to compare both, create two Compose services (or
-   two projects), one with `COMPOSE_PROFILES=keycloak` and one with
-   `COMPOSE_PROFILES=authentik`.
+   Deploy one IdP per stack; to compare them, create a separate Compose service
+   (or project) per IdP — one each with `COMPOSE_PROFILES=keycloak`,
+   `=authentik`, and `=zitadel`.
 
 ### 7.3 Environment variables and secrets
 
@@ -243,7 +253,16 @@ they are not handed to you by the IdP. Generate them all at once:
 ```bash
 python3 -c "import secrets as s; [print(f'{k}={s.token_hex(n)}') for k,n in \
 [('OIDC_CLIENT_SECRET',24),('SESSION_SECRET',32),('AK_SECRET_KEY',32),\
-('AK_DB_PASSWORD',16),('AK_BOOTSTRAP_TOKEN',24),('KC_DB_PASSWORD',16)]]"
+('AK_DB_PASSWORD',16),('AK_BOOTSTRAP_TOKEN',24),('KC_DB_PASSWORD',16),\
+('ZITADEL_DB_PASSWORD',16)]]"
+```
+
+ZITADEL's masterkey is the one secret that is **not** hex — it must be **exactly
+32 characters**, and it can never change after first boot. Generate it
+separately:
+
+```bash
+python3 -c "import secrets,string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)))"
 ```
 
 | Variable | Generate with | What it's for | Used by |
@@ -254,7 +273,9 @@ python3 -c "import secrets as s; [print(f'{k}={s.token_hex(n)}') for k,n in \
 | `AK_SECRET_KEY` | `token_hex(32)` | Authentik's internal crypto key | Authentik profile |
 | `AK_DB_PASSWORD` | `token_hex(16)` | Authentik's Postgres password | Authentik profile |
 | `AK_BOOTSTRAP_TOKEN` | `token_hex(24)` | Authentik's initial API token | Authentik profile |
-| `KC_ADMIN_PASSWORD` / `AK_ADMIN_PASSWORD` | your choice (strong) | IdP admin login | respective profile |
+| `ZITADEL_MASTERKEY` | 32 chars (see above) | ZITADEL's data-at-rest key — **immutable** | ZITADEL profile |
+| `ZITADEL_DB_PASSWORD` | `token_hex(16)` | ZITADEL's Postgres password | ZITADEL profile |
+| `KC_ADMIN_PASSWORD` / `AK_ADMIN_PASSWORD` / `ZITADEL_ADMIN_PASSWORD` | your choice (strong) | IdP admin login | respective profile |
 
 (Only generate the rows for the IdP profile you're deploying.)
 
@@ -273,6 +294,12 @@ agree on it. Generate it once, then:
   `OIDC_CLIENT_SECRET` env var (the `!Env [OIDC_CLIENT_SECRET, ...]` line), so
   you set it **once** in Dokploy and both the app and Authentik's provider use
   it. Nothing to copy by hand.
+- **ZITADEL** — you do **not** pre-set this. ZITADEL generates the client secret
+  when you create the application in the Console; copy it from there into
+  `OIDC_CLIENT_SECRET` and redeploy `web` (§7.9 Step 4). Same one-way direction
+  as Keycloak's "adopt Keycloak's secret" alternative — the value originates in
+  the IdP, not in your env. The `OIDC_CLIENT_ID` is likewise a Console-generated
+  value (not `django-app`).
 
 #### About `AK_SECRET_KEY` (Authentik only)
 
@@ -286,6 +313,7 @@ encrypted with it.
 
 - Keycloak: `https://id.staging.example.com/realms/demo`
 - Authentik: `https://id.staging.example.com/application/o/django`
+- ZITADEL: `https://id.staging.example.com` — the **host root**, no path.
 
 > The demo secrets pre-filled in the repo's `.env.*`, `realm-demo.json`, and
 > blueprint exist only so local testing works out of the box. Always replace
@@ -304,6 +332,14 @@ attaches `dokploy-network` for you). Map:
 
 Enable HTTPS / Let's Encrypt for each. The compose uses `expose` (not `ports`)
 precisely so Traefik owns external traffic.
+
+> **ZITADEL is the exception — do *not* add a domain for it in the Domains tab.**
+> ZITADEL needs HTTP/2 (h2c) to its API and path-based routing across two
+> backends (API + Login UI), which the UI can't express, so
+> `docker-compose.dokploy.yml` ships the Traefik labels for `zitadel-api` /
+> `zitadel-login` directly. You only set `IDP_DOMAIN`; the labels do the rest.
+> Adding a UI domain on top would create a conflicting plain-HTTP router. Details
+> in §7.9.
 
 ### 7.5 Keycloak: required setup steps
 
@@ -456,6 +492,133 @@ extra_hosts:
   - "${IDP_DOMAIN}:host-gateway"
 ```
 
+### 7.9 ZITADEL: required setup steps
+
+ZITADEL is the heaviest of the three to stand up here, for reasons that are
+structural, not incidental: it runs as **two web backends** (a Go API and a
+Next.js Login app) plus Postgres, the API speaks **gRPC / HTTP-2**, and the
+public URL is bound strictly to the instance. The compose file already encodes
+all of that; the steps below are what *you* still control.
+
+**Step 1 — Set domain, masterkey, DB password, and admin (env).** In the
+Environment tab set `IDP_DOMAIN`, `ZITADEL_MASTERKEY` (exactly 32 chars — never
+changes), `ZITADEL_DB_PASSWORD`, and `ZITADEL_ADMIN_USERNAME` /
+`ZITADEL_ADMIN_PASSWORD` / `ZITADEL_ADMIN_EMAIL`. The external-URL settings
+ZITADEL is famously strict about (`ZITADEL_EXTERNALDOMAIN`, `…PORT=443`,
+`…SECURE=true`, `ZITADEL_TLS_ENABLED=false`) are already wired to your
+`IDP_DOMAIN` in the compose. If they don't match the real public endpoint,
+ZITADEL returns **"Instance not found"** — that error almost always means an
+`EXTERNAL*` mismatch, not a genuinely missing instance.
+
+**Step 2 — Leave routing to the compose labels; don't add a UI domain.**
+`zitadel-api` carries
+`traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c` (cleartext
+HTTP/2 to the Go backend — **required, or the admin Console won't work**), plus a
+priority-ordered set of routers that split the single hostname:
+
+| Path | Backend | Why |
+|---|---|---|
+| `/`, `/ui/v2/login` | `zitadel-login` (:3000, http) | the Login V2 UI |
+| `/api` (prefix stripped) | `zitadel-api` (:8080, h2c) | API alias |
+| everything else | `zitadel-api` (:8080, h2c) | discovery, token, OIDC, Console |
+
+Leave these alone unless you rename the service or domain. (This works on Dokploy
+because Compose services honor custom Traefik labels; the **Preview Compose**
+button shows the merged result before deploy.)
+
+**Step 3 — Deploy, then find the admin login name.** Set
+`COMPOSE_PROFILES=zitadel` and deploy. First boot runs migrations + instance
+setup — watch `zitadel-api` logs for readiness; `zitadel-login` only goes healthy
+after the API mints its service-account PAT into the shared `zitadel-bootstrap`
+volume.
+
+> **The #1 ZITADEL login mistake.** Your admin login name is **not**
+> `admin@<IDP_DOMAIN>`. With the default settings the username is suffixed by the
+> *organization* domain, and the default org "ZITADEL" becomes `zitadel`. So you
+> log in at `https://<IDP_DOMAIN>/ui/console` as
+> **`<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>`** — e.g.
+> `admin@zitadel.id.staging.example.com` — with `ZITADEL_ADMIN_PASSWORD`. The
+> password must satisfy default complexity (≥8 chars, upper + lower + number +
+> symbol) or setup rejects it. The bootstrap is **one-shot** (only on an empty
+> DB); to change the admin later, wipe the `zitadel-db-data` volume and redeploy.
+
+**Step 4 — Create the Django app and wire its credentials.** ZITADEL has no
+import file, so onboard the app by hand (full general procedure in §7.10):
+
+1. In the Console, create a **Project**, then a **Web** application with auth
+   method **Basic Auth** (this matches the app's confidential client; PKCE is
+   secret-less and would fail token exchange because the app sends a secret).
+2. Register redirect URI `https://<APP_DOMAIN>/auth/callback` and post-logout
+   `https://<APP_DOMAIN>/auth/logout/callback`.
+3. Copy the **Client ID** and **Client Secret**.
+4. Set in the app's env — `OIDC_ISSUER=https://<IDP_DOMAIN>` (host root),
+   `OIDC_PROVIDER_NAME=ZITADEL`, `OIDC_CLIENT_ID=<copied>`,
+   `OIDC_CLIENT_SECRET=<copied>` — then redeploy `web`.
+
+`offline_access` (refresh tokens) needs no extra per-user role on ZITADEL — there
+is no Keycloak-style offline-token step here; verify on first login.
+
+### 7.10 Onboarding a new application to ZITADEL (any app, not just this one)
+
+Because ZITADEL provisions nothing from a file on boot, **every** application is
+registered through the Console after the instance is up. This is the recurring
+day-2 cost to weigh against Keycloak's realm export/import and Authentik's
+blueprints — a few clicks, but manual and per-app. The flow is the same whatever
+the app (a Grafana, an internal dashboard, this Django demo):
+
+**1. Pick or create a Project.** ZITADEL groups applications under *Projects* (a
+project is a unit of access control — its roles and authorizations apply to all
+apps inside it). Console → **Projects** → use an existing one or **Create
+Project**.
+
+**2. Create the application and choose its type.** In the project →
+**Applications → New** → name it → choose the type:
+
+| App type | Examples | Recommended auth method |
+|---|---|---|
+| **Web** | server-rendered apps / backends that hold a secret (Django, Rails, Spring) | **PKCE**, or **Basic Auth** if the app sends a client secret |
+| **Single Page App** | React / Vue / Angular in the browser | **PKCE** (no secret) |
+| **Native** | mobile / desktop / CLI | **PKCE** (required) |
+| **API** | resource servers that only validate tokens | JWT / introspection (no login flow) |
+
+**3. Choose the authentication method deliberately** — this is the choice people
+get wrong:
+
+- **PKCE** — no client secret. Correct for SPAs, native apps, and web apps that
+  can do PKCE without a secret. ZITADEL recommends it.
+- **Basic Auth (client secret)** — the app authenticates the token request with
+  `client_id` + `client_secret`. Use this for confidential web apps that send a
+  secret (**this Django app**). ZITADEL generates the secret; you copy it out.
+- **JWT with Private Key** — highest-assurance machine auth (the app signs a JWT
+  with a registered key); no shared secret to leak.
+- Avoid **POST** and the **Implicit** flow (the latter is being removed in
+  OAuth 2.1).
+
+**4. Register redirect URIs.** Add the exact post-login `redirect_uri` and any
+`post_logout_redirect_uri`. ZITADEL only redirects to registered URLs, and they
+must be HTTPS outside local dev. Carry per-request context in the `state`
+parameter rather than registering many URIs.
+
+**5. Collect credentials.** Copy the **Client ID** (always) and, for Basic Auth,
+the **Client Secret** (shown once). These go into the app's OIDC config.
+
+**6. Scopes & claims.** Standard `openid profile email` covers identity; add
+`offline_access` for refresh tokens. ZITADEL also exposes reserved
+`urn:zitadel:iam:*` scopes (roles, org info) for apps that need them — but unknown
+scopes are provider-specific, so keep portable apps to the standard set (this is
+exactly why those scopes were removed from this app for Keycloak/Authentik
+compatibility — see §2).
+
+**7. Who can log in.** By default, users in the instance can authenticate to the
+app. To restrict access or surface app-specific roles in tokens, use the
+project's **Roles** and grant **Authorizations** to users/orgs. (Exact toggle
+labels shift between ZITADEL versions; read the project's settings screen rather
+than relying on a remembered path.)
+
+**8. Verify.** Open `https://<IDP_DOMAIN>/.well-known/openid-configuration` — the
+`issuer` value there is exactly what the app must use as `OIDC_ISSUER`. Then run
+the app's login flow.
+
 ---
 
 ## 8. Production hardening checklist
@@ -485,17 +648,21 @@ Verify / decide before real production:
 
 ---
 
-## 9. Choosing between Keycloak and Authentik
+## 9. Choosing between Keycloak, Authentik, and ZITADEL
 
-Both are mature, self-hostable, and speak standard OIDC, so this app works with
-either. Considerations that tend to matter when picking:
+All three are mature, self-hostable, and speak standard OIDC, so this app works
+with any of them. Considerations that tend to matter when picking:
 
 - **Footprint.** Keycloak is a single JVM service plus a database. Authentik is
-  multiple services (server, worker, database, Redis). Keycloak is lighter to
-  run; Authentik's split scales features but adds moving parts.
-- **Config-as-code.** Keycloak imports/export realms as JSON; Authentik uses
-  YAML blueprints reconciled continuously. Both suit GitOps; blueprints lean
-  more declarative.
+  multiple services (server, worker, database, Redis). ZITADEL is a Go API + a
+  Next.js Login app + Postgres — no JVM, but more processes than Keycloak.
+  Keycloak is the lightest to run; the other two trade footprint for features.
+- **Config-as-code & app onboarding.** Keycloak imports/exports realms as JSON
+  (one-shot on first boot); Authentik reconciles YAML blueprints continuously;
+  ZITADEL provisions nothing from a file on boot, so each application is
+  registered by hand in the Console (or via its management API / Terraform
+  provider) — the most manual of the three for onboarding new apps (§7.10), and
+  an axis worth weighing if you expect to add apps often.
 - **Protocol breadth.** Keycloak centers on OIDC/OAuth2/SAML and fine-grained
   authorization. Authentik adds proxy/forward-auth outposts and LDAP, which is
   handy if you need to front non-OIDC apps.
@@ -505,7 +672,9 @@ either. Considerations that tend to matter when picking:
   Authentik has a more modern UI and is moving quickly.
 
 Use the side-by-side staging deploys to evaluate the operational feel (resource
-use, upgrade story, admin ergonomics) rather than features on paper.
+use, upgrade story, admin ergonomics, and how painful it is to onboard a new
+application) rather than features on paper. The three-way pick for this project
+is deferred until that comparison is done.
 
 ---
 
@@ -525,6 +694,11 @@ use, upgrade story, admin ergonomics) rather than features on paper.
 | Authentik: "Invalid password" for `akadmin` | The akadmin bootstrap is run by the **`authentik-worker`** container; if the `AUTHENTIK_BOOTSTRAP_*` vars aren't on the worker, akadmin gets a random password (§7.6). The compose now sets them on both server and worker. To recover an already-bootstrapped instance: `ak create_recovery_key 10 akadmin` inside the container, then open the printed URL. The bootstrap is one-shot — editing env after first boot won't change an existing akadmin; wipe `authentik-db-data` to re-bootstrap. Also confirm you're using the username `akadmin`, not the email. |
 | Static files 404 in production | `collectstatic` didn't run — the entrypoint runs it automatically when `PY_ENV=production`; check the container logs. |
 | App can't reach IdP in prod (connection refused/timeout) | Hairpin NAT; see §7.8 and the `extra_hosts` fallback. |
+| ZITADEL: "Instance not found" | `ZITADEL_EXTERNALDOMAIN`/`EXTERNALPORT`/`EXTERNALSECURE` don't match the public URL. They're wired to `IDP_DOMAIN`:443:true in the compose — confirm `IDP_DOMAIN` is set and you're reaching it over HTTPS (§7.9 Step 1). |
+| ZITADEL admin login rejected | Wrong login name. It's `<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>` (org-domain suffix), **not** `@<IDP_DOMAIN>` (§7.9 Step 3). Also confirm the password meets complexity. The bootstrap is one-shot — wipe `zitadel-db-data` to reset it. |
+| ZITADEL Console blank / gRPC or network errors | The API isn't being reached over HTTP/2. Confirm `traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c` is present and applied (Dokploy **Preview Compose**), and that you did **not** also add a domain in the UI (which creates a conflicting plain-HTTP router) (§7.9 Step 2). |
+| ZITADEL login page 404s / `/` doesn't load | Path-routing priorities or the API↔Login PAT bridge. Check both `zitadel-api` and `zitadel-login` are healthy and share the `zitadel-bootstrap` volume; the login router (`/ui/v2/login`, priority 250) and root rewrite (priority 400) must outrank the API catch-all (100). |
+| ZITADEL `invalid_client` at token exchange | App registered with **PKCE** (secret-less) but it sends a secret — register it as **Basic Auth**; or `OIDC_CLIENT_SECRET` doesn't match the Console value (copy it again, redeploy `web`) (§7.9 Step 4). |
 
 ---
 
@@ -532,7 +706,7 @@ use, upgrade story, admin ergonomics) rather than features on paper.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `COMPOSE_PROFILES` | Dokploy | Active Compose profile: `keycloak` or `authentik`. Required for the Dokploy deploy — without it no services start. (Local CLI uses `--profile` instead.) |
+| `COMPOSE_PROFILES` | Dokploy | Active Compose profile: `keycloak`, `authentik`, or `zitadel`. Required for the Dokploy deploy — without it no services start. (Local CLI uses `--profile` instead.) |
 | `OIDC_ISSUER` | yes | IdP issuer base URL (may include a path) |
 | `OIDC_CLIENT_ID` | yes | OAuth client ID |
 | `OIDC_CLIENT_SECRET` | yes | OAuth client secret (Authlib needs a value even with PKCE) |
