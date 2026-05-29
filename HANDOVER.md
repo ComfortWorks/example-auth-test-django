@@ -1,4 +1,4 @@
-# Handover: Adapting `zitadel/example-auth-django` for Keycloak / Authentik on Dokploy
+# Handover: Adapting `zitadel/example-auth-django` for Keycloak / Authentik / ZITADEL on Dokploy
 
 **Purpose of this document.** This is a complete context transfer for resuming
 work in a fresh session. It captures the goal, every change made, every problem
@@ -6,26 +6,34 @@ hit and how it was solved, the current state of the deployment, and the open
 items. Read it top to bottom and you should be able to continue without the
 original chat history.
 
+**Status in one line:** all three IdPs (Keycloak, Authentik, ZITADEL) are
+deployed and working end-to-end on Dokploy staging. The project is at the
+**evaluation-conclusion** phase — the production pick is pending the operator's
+operational gut read (deferred), informed by the comparison in §9.
+
 ---
 
 ## 1. Goal & background
 
 Take the upstream repo **`https://github.com/zitadel/example-auth-django`** (a
 Django OpenID Connect demo app, originally wired for ZITADEL) and use it to
-**evaluate Keycloak vs Authentik** (and optionally ZITADEL) as identity
-providers, with the intent of choosing one for production.
+**evaluate Keycloak vs Authentik vs ZITADEL** as identity providers, with the
+intent of choosing one for production (~100 internal users at an e-commerce
+company).
 
 The chosen workflow:
 
-1. Fork the repo, apply adaptations.
-2. Test locally with Docker Compose against both IdPs.
+1. Fork the repo, apply adaptations (make it provider-agnostic).
+2. Test locally with Docker Compose against the IdPs.
 3. Deploy to **Dokploy** as a production-like *staging* environment — app + IdP
    as separate services in one project — to compare them realistically before a
    production decision.
-4. Maintain a comprehensive guide for setup/use/deploy.
+4. Maintain a comprehensive guide for setup/use/deploy (`GUIDE.md`).
 
-**Operator context:** works on Malaysia time (MYT, GMT+8); deploying on a
-Dokploy host with domains under `staging.comfort-works.com`.
+**Operator context:** frontend developer with infra responsibilities; works on
+Malaysia time (MYT, GMT+8); deploying on a Dokploy host with domains under
+`staging.comfort-works.com`. Also does Shopify storefront work (unrelated to this
+repo, but the same operator).
 
 ---
 
@@ -44,13 +52,18 @@ Dokploy host with domains under `staging.comfort-works.com`.
     service name (`keycloak` / `authentik`), so the user adds
     `127.0.0.1 keycloak authentik` to `/etc/hosts`.
   - *In production:* both reach the IdP via its public HTTPS domain.
-- **Two IdPs, two provisioning models — this is the core evaluation finding:**
+- **Three IdPs, three provisioning models — this is the core evaluation finding:**
   - **Keycloak** imports its realm JSON **only once** (on first start, when the
     realm doesn't yet exist). Later edits to the file are ignored; post-deploy
     changes must be done in the admin UI (or by wiping the realm/DB and
     re-importing). Setup required several manual steps (see §6).
   - **Authentik** reconciles its **blueprint on every startup**, so edits to the
-    blueprint apply on redeploy. Much lower-touch.
+    blueprint apply on redeploy. The lowest-touch of the three.
+  - **ZITADEL** provisions **nothing from a file on boot** — only the instance and
+    its admin are bootstrapped (one-shot). Every application is registered **by
+    hand in the Console** afterward (or via its management API / Terraform). This
+    is the most manual onboarding model of the three, and the trade for its
+    modern, API-first core.
 
 ---
 
@@ -76,7 +89,9 @@ it provider-agnostic) and **production-readiness**.
 - **Path-based issuer support.** `lib/config.py` keeps the full issuer path
   (only strips a trailing slash) and supports an optional `OIDC_DISCOVERY_URL`
   override. Needed because Keycloak's issuer is `<host>/realms/<realm>` and
-  Authentik's is `<host>/application/o/<slug>`, not the host root.
+  Authentik's is `<host>/application/o/<slug>`, not the host root. (ZITADEL's
+  *is* the host root, so it needs no path — but the same code path handles all
+  three.)
 - **Branding:** templates now say "OpenID Connect"; `static/zitadel-logo.svg`
   **deleted**, replaced by the existing `static/openid-logo.svg`.
 - **Files touched:** `lib/config.py`, `lib/auth.py`, `lib/scopes.py`,
@@ -140,9 +155,9 @@ Full repository tree (after all changes in this project):
 ├── docker
 │   └── entrypoint.sh                       # PY_ENV=production → gunicorn+collectstatic; else runserver
 ├── docker-compose.yml                      # LOCAL: profiles `keycloak` / `authentik`
-├── docker-compose.dokploy.yml              # STAGING/PROD: Dokploy + Traefik, profiles
+├── docker-compose.dokploy.yml              # STAGING/PROD: Dokploy + Traefik, profiles keycloak/authentik/zitadel
 ├── env.authentik.example                   # local app config (Authentik)
-├── env.dokploy.example                     # env template for Dokploy UI
+├── env.dokploy.example                     # env template for Dokploy UI (now includes ZITADEL_* vars)
 ├── env.keycloak.example                    # local app config (Keycloak)
 ├── keycloak
 │   └── realm-demo.json                     # auto-imported realm: client + demo user
@@ -196,10 +211,16 @@ files, `keycloak/realm-demo.json`, `authentik/blueprints/django-oidc.yaml`,
 (provider-agnostic naming, standard-only scopes, path-based issuers, production
 hardening) — structure unchanged.
 
+> **ZITADEL has no committed provisioning file** — by design (§2). It is
+> stood up entirely from `docker-compose.dokploy.yml` (the `zitadel` profile:
+> `zitadel-api` + `zitadel-login` + `zitadel-db`, a shared `zitadel-bootstrap`
+> volume, and the Traefik labels) plus `ZITADEL_*` env vars; the app is then
+> onboarded by hand in the Console.
+
 > The runtime `.env.keycloak`, `.env.authentik`, and `.env` files are
 > gitignored and therefore not in the tree above — they're created locally by
 > copying the matching `env.*.example`. Dokploy uses its own Environment tab
-> (no `.env` file on disk) and reads `.env.dokploy.example` only as a template.
+> (no `.env` file on disk) and reads `env.dokploy.example` only as a template.
 
 ---
 
@@ -217,6 +238,9 @@ docker compose --profile keycloak --profile authentik up --build   # both
 
 - Keycloak admin: `http://keycloak:8080` (admin/admin), realm `demo`.
 - Authentik admin: `http://authentik:9000/if/admin/` (akadmin + bootstrap pass).
+- ZITADEL is primarily a *staging* target here; to run it locally, reuse the
+  `zitadel` profile from `docker-compose.dokploy.yml`, or point the app at
+  ZITADEL Cloud (issuer is the host root either way).
 
 ### 5.2 Dokploy (staging/prod) — uses `docker-compose.dokploy.yml`
 
@@ -227,12 +251,20 @@ Dokploy UI; `PY_ENV=production`; secrets/domains from Dokploy env vars.
 **Critical Dokploy facts learned:**
 - Attach web-facing services to the **external `dokploy-network`**; use
   `expose`, never bind `80:80`/`443:443`.
-- **`COMPOSE_PROFILES` must be set as an env var** (`keycloak` or `authentik`).
-  There's no `--profile` CLI flag in the Dokploy UI. If unset, **zero** services
-  start (every service is profile-gated) and you get
+- **`COMPOSE_PROFILES` must be set as an env var** (`keycloak`, `authentik`, or
+  `zitadel`). There's no `--profile` CLI flag in the Dokploy UI. If unset,
+  **zero** services start (every service is profile-gated) and you get
   `No such container: select-a-container`.
 - `APP_DOMAIN` and `IDP_DOMAIN` **must be different hostnames** (subdomains of
   one domain are fine) — Traefik routes by hostname, so they can't collide.
+- **Domains tab vs manual labels:** `web`, `keycloak`, and `authentik-server`
+  get their domain via the Dokploy **Domains** tab (it injects the Traefik labels
+  + attaches `dokploy-network`). **ZITADEL is the exception** — it needs **h2c**
+  (cleartext HTTP/2) to its API and **path-based routing across two backends**,
+  which the UI can't express, so its Traefik labels are written **directly in the
+  compose**. For ZITADEL you only set `IDP_DOMAIN`; do **not** add a UI domain
+  (it would create a conflicting plain-HTTP router). The **Preview Compose**
+  button shows the merged labels before deploy.
 
 ---
 
@@ -247,8 +279,8 @@ UI, while the JSON file was *also* updated for future clean deploys.
 - **Cause:** `COMPOSE_PROFILES` not set → no services matched → nothing created.
   (Can also appear as a harmless cosmetic log artifact if the app *did* deploy;
   distinguish by checking whether containers actually run.)
-- **Fix:** set `COMPOSE_PROFILES=keycloak` (or `authentik`) in the Dokploy
-  Environment tab. Documented in GUIDE §7.2 / §7.3 / troubleshooting.
+- **Fix:** set `COMPOSE_PROFILES=keycloak` (or `authentik`, or `zitadel`) in the
+  Dokploy Environment tab. Documented in GUIDE §6.2 / troubleshooting.
 
 ### P2 — Keycloak 500 on startup: `URISyntaxException: Expected scheme-specific part at index 6: https:`
 - **Cause:** `KC_HOSTNAME` resolved to a bare `https://` because `IDP_DOMAIN`
@@ -353,12 +385,12 @@ role/scope changes are required. We kept it, to test the realistic full flow.
   `authentik-server` and `authentik-worker` so the blueprint reads both inputs
   from env in every environment — local, staging, prod — and the hardcoded
   blueprint values are pure fallbacks the shipped compose files never rely on.
-  GUIDE §6 updated to say so.
+  GUIDE §6.6 updated to say so.
 - **Parity principle made explicit (operator-stated, recorded for future
   changes):** variable names and wiring should be **constant** across local /
   staging / prod; only the *values* differ — demo constants locally so the repo
   runs out of the box, freshly generated secrets in staging and prod (per
-  GUIDE §7.3 and §8). The one value legitimately shared across all three is
+  GUIDE §6.3 and §8). The one value legitimately shared across all three is
   the client ID (`django-app`); the client secret deliberately differs per
   environment.
 - **Status: RESOLVED ✅.** Recovery key unblocked the running staging instance;
@@ -368,9 +400,89 @@ role/scope changes are required. We kept it, to test the realistic full flow.
   flow is now also **verified working** on Dokploy. P7 is fully closed and the
   Authentik bring-up is complete.
 
+### ZITADEL bring-up (P8–P9)
+
+ZITADEL was added as a third profile after Keycloak and Authentik were both
+working. Several of its notorious sharp edges were **navigated correctly up front**
+by following ZITADEL's own v4 self-hosting docs rather than discovered as failures
+— recorded here so they're treated as *known constraints*, not re-derived. The
+stack is three containers: a Go API (`ghcr.io/zitadel/zitadel:v4.13.0`, :8080) +
+a **separate** Next.js Login V2 app (`ghcr.io/zitadel/zitadel-login:v4.13.0`,
+:3000) + Postgres (`postgres:17-alpine`).
+
+- **Masterkey** must be **exactly 32 characters**, set before first boot, and is
+  **immutable** (it's the data-at-rest key). Supplied via `ZITADEL_MASTERKEY`
+  (not hex — any 32-char string).
+- **External-URL strictness:** `ZITADEL_EXTERNALDOMAIN` / `EXTERNALPORT=443` /
+  `EXTERNALSECURE=true` must equal the public endpoint, with
+  `ZITADEL_TLS_ENABLED=false` (Traefik terminates TLS) and DSN `?sslmode=disable`.
+  Any mismatch surfaces as **"Instance not found"**, not an obvious URL error.
+- **Routing:** the API needs **h2c** (cleartext HTTP/2) for the gRPC Console, and
+  the public hostname is split by path across the two backends. Done with
+  **hand-written Traefik labels in the compose**, NOT the Dokploy Domains tab
+  (§5.2; GUIDE §6.7). Path priorities: root `/` (302 redirect, see P9) and
+  `/ui/v2/login` (Login UI) outrank `/api` (stripped) and the catch-all, which
+  go to the API.
+- **Admin login name** is suffixed by the org domain:
+  `<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>` (the default org "ZITADEL" →
+  `zitadel`, because `UserLoginMustBeDomain=false` by default). The operator's
+  working login was `ziadmin@zitadel.zitadel.staging.comfort-works.com` — the
+  **doubled `zitadel.`** is because their `IDP_DOMAIN` itself begins `zitadel.`;
+  expected, not a typo. Password must meet default complexity (≥8, upper + lower +
+  number + symbol).
+- **App onboarding is manual** in the Console (no realm/blueprint equivalent): the
+  Django app was registered as a **Web app with Basic Auth** (confidential client;
+  it sends a secret — PKCE would fail the token exchange), redirect URIs added,
+  and the **generated Client ID + Secret** copied into the env. Issuer is the
+  **host root** `https://<IDP_DOMAIN>`. Discovery confirmed `client_secret_basic`
+  and `offline_access`.
+- **offline_access** needs **no** per-user role (unlike Keycloak P5/P6).
+
+Two genuine failures were hit and fixed:
+
+### P8 — ZITADEL crash-loop on first boot: `'FirstInstance.Org.LoginClient.Pat.ExpirationDate' parsing time "2099-01-01 00:00:00 +0000 UTC" as "2006-01-02T15:04:05Z07:00": cannot parse`
+- **Stage:** instance bootstrap (`start-from-init`), *after* DB migrations
+  succeeded — so the database was fine; only instance creation died.
+- **Cause (our bug):** the login service-account PAT expiry was written as a
+  **bare ISO timestamp literal in the compose YAML**
+  (`PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"`). During Dokploy's YAML
+  round-trip the bare timestamp was coerced to a Go `time.Time` and re-stringified
+  to `2099-01-01 00:00:00 +0000 UTC` — which is **not** RFC3339, so ZITADEL's own
+  parser rejected it.
+- **Fix:** deliver the value through an **environment variable**
+  (`ZITADEL_PAT_EXPIRATION=2099-01-01T00:00:00Z`, referenced as
+  `${ZITADEL_PAT_EXPIRATION}` in the compose). Env values are passed as opaque
+  strings and never coerced. **No DB wipe needed** — the instance hadn't been
+  created yet, so a fix-and-redeploy was sufficient. Operator confirmed it worked.
+- **Lesson:** never write a bare date/time (or anything YAML might re-type) as a
+  literal in a compose value that a strict parser will read downstream; pass it
+  via env.
+
+### P9 — ZITADEL: after admin login you land on `/ui/v2/login/signedin` and never reach the Console
+- **Stage:** immediately after the first successful admin login.
+- **Cause (our routing choice):** the initial root (`/`) Traefik label rewrote the
+  bare domain to the Login V2 UI. Logging in from there directly means there is no
+  OIDC **auth request** in flight, so ZITADEL has nowhere to return the user and
+  parks them on its default `signedin` page instead of the Console.
+- **Immediate fix:** browse to `https://<IDP_DOMAIN>/ui/console/` — already
+  authenticated, so it drops straight into the Console.
+- **Durable fix (shipped):** changed the root router from a rewrite-to-login into a
+  **302 redirect to `https://<IDP_DOMAIN>/ui/console/`** (a `redirectregex` with a
+  static replacement; the router is already filtered to `Path(/)`). End users are
+  unaffected — they always arrive via an auth request at
+  `/ui/v2/login/login?authRequest=...`, never the bare root.
+- **Status: RESOLVED ✅.** Console renders, h2c works end-to-end, and the Django
+  app login against ZITADEL completes to `/profile`.
+
+**ZITADEL status: DONE ✅.** Full OIDC login works end-to-end on Dokploy staging
+(issuer `https://zitadel.staging.comfort-works.com`). All three IdPs are now
+working.
+
 ---
 
-## 7. Current state of `keycloak/realm-demo.json` (the evolved file)
+## 7. Current state of the IdP provisioning artifacts
+
+### 7.1 `keycloak/realm-demo.json` (the evolved file)
 
 Client `django-app` (confidential, PKCE S256):
 - `secret`: `4595ee67699f...` (demo value — **rotate for real use**)
@@ -389,6 +501,24 @@ User `demo`:
 > realm. It only matters for a *fresh* import (new deploy, or after wiping the
 > Keycloak DB volume / deleting the realm).
 
+### 7.2 Authentik blueprint (`authentik/blueprints/django-oidc.yaml`)
+
+Reconciled by the worker on **every** startup. Provisions the OAuth2 provider
+`django-provider` and application `django`; reads `APP_BASE_URL` and
+`OIDC_CLIENT_SECRET` from env (set on **both** `authentik-server` and
+`authentik-worker`, with hardcoded fallbacks the shipped compose never relies on).
+Only `akadmin` exists (no `demo`-equivalent end user).
+
+### 7.3 ZITADEL — no provisioning file (state lives in the instance DB)
+
+Stood up entirely from the `zitadel` profile in `docker-compose.dokploy.yml`
+(`zitadel-api` + `zitadel-login` + `zitadel-db` + the shared `zitadel-bootstrap`
+volume + Traefik labels) and `ZITADEL_*` env. On the running staging instance the
+Django app is registered as a **Web app / Basic Auth** under a project, with its
+redirect + post-logout URIs and a Console-generated client ID/secret copied into
+the env. Issuer is the host root. To reproduce on a clean instance, repeat the
+Console onboarding (GUIDE §6.7 / §7.4) — there is no file to import.
+
 ---
 
 ## 8. Open items / where we are
@@ -399,31 +529,30 @@ User `demo`:
   *running* realm via the admin UI; `realm-demo.json` was also updated so a fresh
   import reproduces the working state without manual steps.
 - **Authentik: DONE ✅.** Full OIDC login works end-to-end on Dokploy staging —
-  app → Authentik → `/profile`. One bring-up issue (P7: akadmin bootstrap
-  password didn't apply because the `AUTHENTIK_BOOTSTRAP_*` env vars were on
-  `authentik-server` only, not on `authentik-worker` which actually runs the
-  bootstrap). Resolved via `create_recovery_key` on the live instance and a
-  repo fix to both compose files. A follow-up local-only client-secret mismatch
-  was caught while applying the parity principle and fixed (server + worker now
-  read `OIDC_CLIENT_SECRET` and `APP_BASE_URL` from env, same wiring as staging).
-  Local OIDC flow also verified. Note: only user provisioned by the blueprint is
-  `akadmin` (no `demo` user) — fine for the eval, but if a non-admin test
-  account is wanted for parity with Keycloak's `demo`, add it to the blueprint.
-- **NEXT — Evaluation phase.** Both IdPs are running, both flows are working.
-  The decision arc is now: compare Keycloak vs Authentik on operational feel,
-  footprint, and config-as-code experience under the conditions of *this*
-  project (Docker Compose on Dokploy, ~100 internal users), then pick one for
-  production. §9 has the observed comparison data so far; further axes — admin
-  UX, MFA/enrollment ergonomics, upgrade story, resource use — should be
-  exercised on the running stacks rather than read about.
+  app → Authentik → `/profile`. P7 (akadmin bootstrap on the worker) resolved;
+  local secret wiring brought to parity. Only `akadmin` is provisioned.
+- **ZITADEL: DONE ✅.** Full OIDC login works end-to-end on Dokploy staging —
+  app → ZITADEL → `/profile`. P8 (PAT timestamp) and P9 (root → Console redirect)
+  resolved; the shipped compose reproduces the working routing.
+- **NOW — Evaluation conclusion.** All three IdPs are running and all three flows
+  work. The decision arc is: compare the three on operational feel, footprint, and
+  config-as-code / app-onboarding experience under the conditions of *this* project
+  (Docker Compose on Dokploy, ~100 internal users), then pick one for production.
+  §9 has the comparison data, including a **measured footprint** table. **The
+  operator has deferred their operational gut read** ("need time to think of the
+  balance between all three") — that subjective read is the remaining input before
+  a recommendation; do not pre-empt it.
 - **Before any real production use:** rotate ALL secrets (the repo ships
   throwaway demo values in `env.*.example`, `realm-demo.json`, and the
   blueprint). For the staging deploys these are already generated; for
-  production, generate fresh again.
+  production, generate fresh again. **ZITADEL's masterkey is immutable** — choose
+  the real one before first boot, because it cannot be rotated afterward.
 
 ---
 
 ## 9. Decision-relevant comparison (observed, not theoretical)
+
+### 9.1 Bring-up friction (what each cost to stand up)
 
 Keycloak required **four** manual/config alignment steps during bring-up, each
 failing at a different stage of the login flow, and each needing the admin UI
@@ -446,8 +575,16 @@ exercise surfaced: Authentik's **admin bootstrap is also one-shot** (only the
 app/provider blueprint reconciles continuously), so neither tool lets you change
 the seeded admin credentials by editing env after first boot.
 
-**Local AND staging OIDC flow end-to-end on Authentik verified working** (sign-in
-→ `/profile` on both).
+ZITADEL was the **most demanding** to stand up — but, notably, mostly because of
+*operator-facing constraints* rather than a string of failed logins (we navigated
+most by following its docs). The cost concentrates in: an immutable 32-char
+masterkey; strict `EXTERNAL*` URL binding (mismatch → "Instance not found"); a
+non-obvious admin login name (`<user>@zitadel.<IDP_DOMAIN>`); **h2c + path-based
+routing via hand-written Traefik labels** (not the Dokploy UI); a PAT timestamp
+that must be passed via env not a YAML literal (P8); and a bare-root → `/ui/console`
+redirect needed to reach the Console after login (P9). Two real bugs (P8, P9) were
+ours and are fixed in the shipped compose. Its standout is the modern API-first
+core; its day-2 cost is **manual Console onboarding** (no boot-time provisioning).
 
 A small parity-related lesson from P7's follow-up: the local Authentik path was
 *almost* set up to mirror staging but didn't wire `OIDC_CLIENT_SECRET` through
@@ -455,15 +592,63 @@ to the IdP, so the blueprint silently fell back to a hardcoded default that the
 app didn't know. This would have failed token exchange the moment we tried the
 end-to-end flow locally. The fix codifies the operator's parity principle:
 **variable names and wiring constant across local/staging/prod; only values
-differ.** This pattern is worth applying preventively whenever new
-configuration is added — diverging wiring across environments is the kind of
-issue that hides until the *next* environment turns it up.
+differ.** Apply this preventively whenever new configuration is added — diverging
+wiring across environments is the kind of issue that hides until the *next*
+environment turns it up.
 
-Other axes to weigh: footprint
-(Keycloak = 1 JVM + DB; Authentik = server + worker + DB + Redis), config-as-code
-model (one-shot import vs continuous reconciliation), protocol breadth, admin UX,
-ecosystem maturity. Recommend judging on operational feel in this staging setup
-rather than feature lists.
+### 9.2 Config-as-code & app onboarding
+
+- **Keycloak** — realm JSON, imported **once** on first boot; post-deploy changes
+  via admin UI or a re-import (wipe DB / delete realm). `${ENV}` placeholders are
+  **not** substituted — hardcode values.
+- **Authentik** — YAML blueprints **reconciled every boot**; edits just apply on
+  redeploy. The most GitOps-friendly of the three.
+- **ZITADEL** — **no boot-time provisioning**; every app is registered by hand in
+  the Console (or via its management API / Terraform provider). The most manual
+  for onboarding new apps, and the axis to weigh if apps are added often.
+
+### 9.3 Measured footprint (idle, this stack)
+
+Idle resident memory of the **IdP containers only** (the Django `web` app, which
+is identical across all three at ~120–160 MiB, is held out; shared Dokploy infra —
+Traefik + its Postgres + Redis ≈ 113 MiB — is constant regardless of IdP):
+
+| IdP | Containers | Idle memory | vs. lightest |
+|---|---|---|---|
+| **ZITADEL** | 3 (API 102 + Login 108 + DB 63) | **~273 MiB** | — |
+| **Keycloak** | 2 (Keycloak 506 + DB 38) | **~544 MiB** | 2.0× |
+| **Authentik** | 4 (server 406 + worker 380 + DB 55 + Redis 13) | **~854 MiB** | 3.1× |
+
+> **Correction to an earlier claim.** It was previously stated (and was in an
+> earlier GUIDE) that **Keycloak is the lightest** to run. The measured data shows
+> the opposite: **ZITADEL is the lightest**, and Keycloak's single JVM alone
+> (506 MiB) is nearly double ZITADEL's *entire* stack (273 MiB). The mistake was
+> equating "fewer containers" with "lighter." **Runtime dominates container
+> count:** Go (ZITADEL's two ~100 MiB processes) < single JVM (Keycloak) <
+> dual-Python (Authentik pays the Python runtime cost twice, in the server *and*
+> the worker, ~400 MiB each).
+
+Caveats on the measurement: it's a single `docker stats --no-stream` sample, so
+**CPU% and BLOCK I/O are not comparable** (instantaneous vs cumulative; uptimes
+differ; `zitadel-api` also absorbed restarts during the P8 debugging, and its
+event-sourcing model does background projection work). These are idle figures — but
+at ~100 users the idle baseline *is* the dominant cost almost all the time, so it's
+the right metric for this scale. **Bottom line: at 100 users footprint is a
+tiebreaker, not a decider** — any of the three runs comfortably on a modest VPS,
+and Keycloak's JVM is tunable downward (`JAVA_OPTS_APPEND` / heap caps) if it ever
+mattered.
+
+### 9.4 Other axes
+
+Protocol breadth (Keycloak: OIDC/OAuth2/SAML + fine-grained authz; Authentik: adds
+proxy/forward-auth outposts and LDAP; ZITADEL: OIDC/OAuth2/SAML, API-first,
+multi-tenant), admin UX, MFA/enrollment ergonomics, upgrade story, ecosystem
+maturity (Keycloak the most established; Authentik and ZITADEL more modern and
+fast-moving). Recommend judging on **operational feel in this staging setup**
+rather than feature lists — which is exactly the operator's pending gut read.
+
+**Local AND staging OIDC flow end-to-end verified working on all three** (sign-in
+→ `/profile`).
 
 ---
 
@@ -471,7 +656,7 @@ rather than feature lists.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `COMPOSE_PROFILES` | Dokploy | `keycloak` or `authentik`; without it no services start |
+| `COMPOSE_PROFILES` | Dokploy | `keycloak`, `authentik`, or `zitadel`; without it no services start |
 | `OIDC_ISSUER` | yes | IdP issuer base URL (may include a path) |
 | `OIDC_CLIENT_ID` | yes | OAuth client ID |
 | `OIDC_CLIENT_SECRET` | yes | OAuth client secret (must match the IdP's) |
@@ -487,10 +672,17 @@ rather than feature lists.
 | `ALLOWED_HOSTS` | no | Comma-separated hostnames |
 | `CSRF_TRUSTED_ORIGINS` | prod | Comma-separated `https://` origins behind proxy |
 
-Dokploy-only IdP vars (see `.env.dokploy.example`): `APP_DOMAIN`, `IDP_DOMAIN`,
-plus per-profile `KC_*` (Keycloak admin/db) or `AK_*` (Authentik secret key, db,
-admin, bootstrap token). Generate secrets with `python -c "import secrets;
-print(secrets.token_hex(N))"`.
+Dokploy-only IdP vars (see `env.dokploy.example`): `APP_DOMAIN`, `IDP_DOMAIN`,
+plus per-profile:
+- **Keycloak** — `KC_*` (admin/db).
+- **Authentik** — `AK_*` (secret key, db, admin, bootstrap token).
+- **ZITADEL** — `ZITADEL_MASTERKEY` (exactly 32 chars, **immutable**),
+  `ZITADEL_DB_PASSWORD`, `ZITADEL_ADMIN_USERNAME` / `ZITADEL_ADMIN_PASSWORD` /
+  `ZITADEL_ADMIN_EMAIL`, and `ZITADEL_PAT_EXPIRATION` (RFC3339, e.g.
+  `2099-01-01T00:00:00Z` — **must be an env var, not a YAML literal**, see P8).
+
+Generate hex secrets with `python -c "import secrets; print(secrets.token_hex(N))"`;
+the masterkey is a 32-char (non-hex) string.
 
 ---
 
@@ -500,54 +692,123 @@ print(secrets.token_hex(N))"`.
 |---|---|---|
 | Keycloak | `https://<idp>/realms/demo` | `<issuer>/.well-known/openid-configuration` |
 | Authentik | `https://<idp>/application/o/django` | `<issuer>/.well-known/openid-configuration` |
-| ZITADEL | `https://<your>.zitadel.cloud` (host root) | `<issuer>/.well-known/openid-configuration` |
+| ZITADEL (self-hosted, this project) | `https://<idp>` — **host root, no path** | `<issuer>/.well-known/openid-configuration` |
+
+> ZITADEL's issuer is the host root whether self-hosted or on ZITADEL Cloud
+> (`https://<your>.zitadel.cloud`). For this project it is the self-hosted staging
+> domain, e.g. `https://zitadel.staging.comfort-works.com`. (Earlier versions of
+> this doc listed only the Cloud form — corrected here.)
 
 Login route is **POST** `/auth/signin/oidc`; callback `/auth/callback`;
 protected page `/profile`.
 
 ---
 
-## 12. Known traps to re-check first if something breaks
+## 12. Troubleshooting checklist / known traps (re-check first if something breaks)
 
-1. **Keycloak realm edits not taking effect** → realm already imported; use admin
-   UI or wipe the Keycloak DB volume to re-import.
-2. **`${ENV}` placeholders in realm JSON** → not reliably substituted; hardcode.
-3. **`iss` mismatch** → browser vs app-server must reach IdP at the same URL
+The full cross-IdP checklist. The chronological debugging history is §6; this is
+the lookup table.
+
+**Cross-cutting / app**
+
+1. **`iss` mismatch** → browser vs app-server must reach the IdP at the same URL
    (`/etc/hosts` locally; same public domain in prod).
-4. **No services deploy on Dokploy** → `COMPOSE_PROFILES` unset.
-5. **Secrets out of sync** → `OIDC_CLIENT_SECRET` must be byte-identical on app
-   and IdP; no trailing whitespace.
-6. **Hairpin NAT** → if the app container can't reach the IdP's public domain,
+2. **No services deploy on Dokploy** → `COMPOSE_PROFILES` unset.
+3. **Secrets out of sync** → `OIDC_CLIENT_SECRET` must be byte-identical on app
+   and IdP; no trailing whitespace. Verify in-container with
+   `docker exec <web> env | grep OIDC_CLIENT_SECRET`.
+4. **`invalid_scope`** → a non-standard scope leaked in; `lib/scopes.py` must list
+   only `openid profile email offline_access`.
+5. **CSRF 403 on sign-in (prod)** → `CSRF_TRUSTED_ORIGINS` missing the app's
+   `https://` origin.
+6. **Static files 404 (prod)** → `collectstatic` runs automatically on
+   `PY_ENV=production`; check container logs.
+7. **App can't reach IdP in prod (connection refused/timeout)** → hairpin NAT;
    uncomment `extra_hosts: ["${IDP_DOMAIN}:host-gateway"]` on `web` in
-   `docker-compose.dokploy.yml` (GUIDE §7.8).
-7. **Authentik `akadmin` "Invalid password"** → bootstrap vars
-   (`AUTHENTIK_BOOTSTRAP_*`) must be on the **`authentik-worker`** service, not
-   just `authentik-server` — the worker runs the bootstrap. If missing, akadmin
-   gets a random password. Recover with `ak create_recovery_key 10 akadmin`. The
-   admin bootstrap is **one-shot**: editing the env after first boot won't change
-   an existing akadmin (wipe `authentik-db-data` to re-bootstrap).
-8. **Logging into Authentik with email vs username** → username is always
-   `akadmin`; the email only matches if `AUTHENTIK_BOOTSTRAP_EMAIL` applied. Use
-   `akadmin` to disambiguate a bootstrap failure from a wrong-identifier typo.
-9. **Blueprint inputs (`OIDC_CLIENT_SECRET`, `APP_BASE_URL`) must be on both
-   `authentik-server` AND `authentik-worker`** in every compose file. The
-   blueprint has hardcoded fallbacks for both — if env is missing, it silently
-   uses the fallback and the app sees an `invalid_client` at token exchange
-   (because the app's secret won't match). The shipped compose files now wire
-   these in both services in both environments; keep it that way when editing.
-10. **Parity principle** → variable names and wiring should be constant across
-    local / staging / prod; only the *values* differ (demo constants locally,
-    freshly generated secrets in staging/prod). When adding a new variable,
-    add it to **all three** of `docker-compose.yml`, `docker-compose.dokploy.yml`,
-    and the relevant `env.*.example` — divergent wiring is what made the local
-    secret mismatch invisible until P7.
+   `docker-compose.dokploy.yml` (GUIDE §6.8).
+8. **Parity principle** → variable names and wiring constant across
+   local/staging/prod; only the *values* differ. When adding a new variable, add
+   it to **all** of `docker-compose.yml`, `docker-compose.dokploy.yml`, and the
+   relevant `env.*.example`.
+
+**Keycloak**
+
+9. **Realm edits not taking effect** → realm already imported (one-shot); use the
+   admin UI or wipe the Keycloak DB volume to re-import.
+10. **`${ENV}` placeholders in realm JSON** → not reliably substituted; hardcode.
+11. **500 on startup (`URISyntaxException`)** → `KC_HOSTNAME` malformed, usually
+    `IDP_DOMAIN` unset/empty. Ensure it's set, plus `KC_PROXY_HEADERS=xforwarded`,
+    `KC_HTTP_ENABLED=true`.
+12. **`invalid_redirect_uri`** → client doesn't list the exact callback; add
+    `https://<APP_DOMAIN>/auth/callback` + `/auth/logout/callback` (admin UI if
+    already imported).
+13. **`invalid_client_credentials` (token exchange)** → secret mismatch, or the
+    client isn't Confidential. Copy from Clients → django-app → Credentials.
+14. **`not_allowed: Offline tokens not allowed`** → needs BOTH `offline_access` as
+    a **Default** client scope AND the user holding the `offline_access` role. Or
+    drop the scope from `lib/scopes.py`.
+
+**Authentik**
+
+15. **"Invalid password" for `akadmin`** → `AUTHENTIK_BOOTSTRAP_*` must be on the
+    **`authentik-worker`** (not just the server), else akadmin gets a random
+    password. Recover with `ak create_recovery_key 10 akadmin` (open the printed
+    URL). Bootstrap is one-shot — wipe `authentik-db-data` to re-bootstrap. Use the
+    username `akadmin`, not the email.
+16. **Blueprint inputs (`OIDC_CLIENT_SECRET`, `APP_BASE_URL`) must be on both
+    `authentik-server` AND `authentik-worker`** in every compose file — the
+    blueprint has hardcoded fallbacks, so missing env silently uses the fallback
+    and the app sees `invalid_client` at token exchange.
+17. **Blueprint didn't apply** → check `authentik-worker` logs; pinned image
+    `2024.12`. If bumped and the schema changed, adjust the blueprint or create the
+    provider/app in the admin UI.
+
+**ZITADEL**
+
+18. **"Instance not found"** → `ZITADEL_EXTERNALDOMAIN`/`EXTERNALPORT`/
+    `EXTERNALSECURE` don't match the public URL (they're wired to `IDP_DOMAIN`:443:
+    true in the compose). Confirm `IDP_DOMAIN` is set and you're on HTTPS.
+19. **Masterkey** → exactly 32 chars, set before first boot, **immutable**.
+20. **Admin login rejected** → login name is
+    `<ZITADEL_ADMIN_USERNAME>@zitadel.<IDP_DOMAIN>` (org-domain suffix), **not**
+    `@<IDP_DOMAIN>`. Check password complexity. Bootstrap one-shot — wipe
+    `zitadel-db-data` to reset.
+21. **Console blank / gRPC or network errors** → API not reached over HTTP/2.
+    Confirm `traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c` is
+    present and applied (Dokploy **Preview Compose**), and that you did **not** add
+    a UI domain (which creates a conflicting plain-HTTP router).
+22. **`start-from-init` fails: `'…Pat.ExpirationDate' parsing time … cannot parse`**
+    → PAT expiry reached ZITADEL as a non-RFC3339 string because a bare timestamp
+    in the compose YAML was coerced. Supply via the `ZITADEL_PAT_EXPIRATION` env
+    var (`2099-01-01T00:00:00Z`) referenced as `${ZITADEL_PAT_EXPIRATION}`. No DB
+    wipe needed (instance not yet created). (P8.)
+23. **After login you land on `/ui/v2/login/signedin`, never the Console** → you
+    opened the login page directly (no auth request). Go to
+    `https://<IDP_DOMAIN>/ui/console/`. The shipped compose redirects the bare root
+    there; if you still land on `signedin`, you're on an old deploy without the
+    root-redirect label. (P9.)
+24. **`invalid_client` at token exchange** → app registered with **PKCE**
+    (secret-less) but it sends a secret — register it as **Basic Auth**; or the
+    secret doesn't match the Console value (copy again, redeploy `web`).
+25. **App onboarding** → ZITADEL provisions nothing on boot; register each app in
+    the Console (GUIDE §7.4). `offline_access` needs no per-user role.
 
 ---
 
 ## 13. Pointers
 
-- **`GUIDE.md`** — the living setup/dev/deploy guide. Dokploy is §7; Keycloak's
-  four required steps are **§7.5**; troubleshooting table is §10.
+- **`GUIDE.md`** — the living setup/dev/deploy guide. It was **restructured** (new
+  section numbering): How it works + the Mermaid auth-flow diagram is **§1**;
+  local dev **§5**; Dokploy deploy **§6** (Keycloak's required steps **§6.5**,
+  Authentik **§6.6**, ZITADEL **§6.7**, hairpin **§6.8**); **day-2 app onboarding
+  for all three IdPs is §7**; common pitfalls **§9**; the curated troubleshooting
+  table **§10**; the three-way comparison + measured footprint **§11**; env
+  reference **§12**. (The **exhaustive** troubleshooting matrix lives here in this
+  HANDOVER — §6 chronological, §12 checklist.)
 - **`oidc-adaptation.patch`** — apply to a fresh fork to get all tracked code
   changes, then add the new files from §4.
 - Upstream: `https://github.com/zitadel/example-auth-django`.
+- ZITADEL self-hosting reference (verified for v4.x): images
+  `ghcr.io/zitadel/zitadel:v4.13.0` (API, :8080, h2c) and
+  `ghcr.io/zitadel/zitadel-login:v4.13.0` (Login V2, :3000), Postgres
+  `postgres:17-alpine`.
