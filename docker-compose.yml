@@ -120,6 +120,11 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: d6cb97568b44697b7861691c
       AUTHENTIK_BOOTSTRAP_TOKEN: 99d7b2f7013af86e8a18af5f27c1d8bde35abb07fada8dac
       AUTHENTIK_BOOTSTRAP_EMAIL: admin@example.com
+      # Consumed by the blueprint — same wiring as docker-compose.dokploy.yml:
+      # redirect URIs from APP_BASE_URL, client secret from OIDC_CLIENT_SECRET.
+      # Must match .env.authentik's OIDC_CLIENT_SECRET and the app's URL.
+      APP_BASE_URL: http://localhost:3001
+      OIDC_CLIENT_SECRET: oidc-secret
     volumes:
       - ./authentik/blueprints:/blueprints/custom:ro
     ports:
@@ -142,6 +147,14 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: 35660f3ee95505fa32bb3ed79920f6c1
       AUTHENTIK_REDIS__HOST: authentik-redis
+      # The worker performs the one-time akadmin bootstrap — these MUST be here,
+      # not only on authentik-server, or akadmin gets a random password.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: d6cb97568b44697b7861691c
+      AUTHENTIK_BOOTSTRAP_TOKEN: 99d7b2f7013af86e8a18af5f27c1d8bde35abb07fada8dac
+      AUTHENTIK_BOOTSTRAP_EMAIL: admin@example.com
+      # Same blueprint inputs as authentik-server (keep both in sync).
+      APP_BASE_URL: http://localhost:3001
+      OIDC_CLIENT_SECRET: oidc-secret
     volumes:
       - ./authentik/blueprints:/blueprints/custom:ro
     depends_on:

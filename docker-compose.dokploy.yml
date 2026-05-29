@@ -191,6 +191,12 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: ${AK_DB_PASSWORD}
       AUTHENTIK_REDIS__HOST: authentik-redis
+      # The WORKER runs the one-time bootstrap that creates the akadmin user.
+      # These MUST be present here too (not only on authentik-server) or the
+      # admin is created with a random password and AK_ADMIN_PASSWORD is ignored.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AK_ADMIN_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AK_BOOTSTRAP_TOKEN}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AK_ADMIN_EMAIL}
       APP_BASE_URL: https://${APP_DOMAIN}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
     volumes:
