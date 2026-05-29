@@ -57,7 +57,8 @@ sequenceDiagram
     I-->>A: id_token + access_token (+ refresh_token if offline_access)
     A->>I: GET /userinfo (access_token)
     I-->>A: claims (sub, email, name, ...)
-    Note over A: validate iss & aud,<br/>store signed-cookie session
+    Note over A: validate iss & aud,
+    store signed-cookie session
     A-->>U: redirect to /profile (authenticated)
 
     Note over U,I: Logout
